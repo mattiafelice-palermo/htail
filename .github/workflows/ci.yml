@@ -26,6 +26,10 @@ jobs:
       - name: Build standalone executable
         run: python tools/build_release.py --output /tmp/htail
       - name: Smoke test bundle
+        env:
+          PYTHONPATH: src
         run: |
-          python /tmp/htail --version
-          test "$(python /tmp/htail --version)" = "htail 0.8.0"
+          actual="$(python /tmp/htail --version)"
+          expected="$(python -c 'from htail_app import VERSION; print(f"htail {VERSION}")')"
+          echo "$actual"
+          test "$actual" = "$expected"
