@@ -118,13 +118,18 @@ class CommandFollower(StreamFollower):
         return f"command exited with status {code}"
 
     def close(self) -> None:
-        if self.process.poll() is not None:
-            return
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=0.5)
-        except Exception:
+        if self.process.poll() is None:
             try:
-                self.process.kill()
+                self.process.terminate()
+                self.process.wait(timeout=0.5)
+            except Exception:
+                try:
+                    self.process.kill()
+                    self.process.wait(timeout=0.5)
+                except Exception:
+                    pass
+        if self.process.stdout is not None:
+            try:
+                self.process.stdout.close()
             except Exception:
                 pass
