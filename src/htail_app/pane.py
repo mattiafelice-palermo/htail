@@ -172,9 +172,13 @@ class Pane:
         self.waiting = False
         self.missing = False
 
+    def _max_top(self, body_height: int) -> int:
+        """Last legal top row that still keeps EOF inside the viewport."""
+        return max(0, len(self._visual_lines) - max(0, body_height))
+
     def _apply_initial_bottom(self, body_height: int) -> None:
         if self._initial_bottom_pending:
-            self.top = max(0, len(self._visual_lines) - max(0, body_height))
+            self.top = self._max_top(body_height)
             self._initial_bottom_pending = False
 
     def add_system_line(self, text: str, warning: bool = False) -> None:
@@ -308,15 +312,15 @@ class Pane:
         elif command == "HOME":
             self.top = 0
         elif command == "END":
-            self.top = max(0, len(self._visual_lines) - body_height)
-        self.top = min(max(0, self.top), max(0, len(self._visual_lines) - 1))
+            self.top = self._max_top(body_height)
+        self.top = min(max(0, self.top), self._max_top(body_height))
 
     def view_rows(self, width: int, height: int) -> List[str]:
         width = max(1, width)
         height = max(0, height)
         self._ensure_layout(width)
         self._apply_initial_bottom(height)
-        self.top = min(max(0, self.top), max(0, len(self._visual_lines) - 1))
+        self.top = min(max(0, self.top), self._max_top(height))
         rows = self._visual_lines[self.top : self.top + height]
         return [_pad_ansi(row, width) for row in rows] + [" " * width] * max(0, height - len(rows))
 
