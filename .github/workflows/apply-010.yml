@@ -1,0 +1,61 @@
+name: Validate htail 0.10.0 integration
+
+on:
+  push:
+    branches:
+      - feature/search-glob-perf-0.10.0
+    paths:
+      - .github/patch_010.py
+      - .github/workflows/apply-010.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/search-glob-perf-0.10.0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Apply integration patch
+        run: python .github/patch_010.py
+      - name: Compile
+        run: python -m compileall -q src tools tests benchmarks
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Compare behavior and performance with v0.9.0
+        env:
+          PYTHONPATH: src
+        run: python benchmarks/reference_compare.py --reference v0.9.0
+      - name: Run append/diff microbenchmark
+        env:
+          PYTHONPATH: src
+        run: python benchmarks/benchmark_htail.py --sizes 1 10 50 --iterations 3
+      - name: Build standalone executable
+        run: python tools/build_release.py --output /tmp/htail
+      - name: Smoke test bundle
+        env:
+          PYTHONPATH: src
+        run: |
+          actual="$(python /tmp/htail --version)"
+          expected="$(python -c 'from htail_app import VERSION; print(f"htail {VERSION}")')"
+          echo "$actual"
+          test "$actual" = "$expected"
+      - name: Commit validated integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests benchmarks README.md RELEASE_NOTES.md docs
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Add search glob and native/damage performance work in htail 0.10.0"
+          git push origin HEAD:feature/search-glob-perf-0.10.0
