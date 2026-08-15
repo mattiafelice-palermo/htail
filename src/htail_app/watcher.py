@@ -170,6 +170,7 @@ class FileFollower:
         self._pending_started: Optional[float] = None
         self._pending_last_change: Optional[float] = None
         self._notification_hint = True
+        self.notification_gated = bool(getattr(args, 'notification_gated', False))
         self.fast_append_hits = 0
         self.stat_probe_count = 0
 
@@ -335,7 +336,7 @@ class FileFollower:
         # Native notifications suppress redundant idle metadata probes. A
         # pending debounced change must continue to be sampled until stable,
         # and periodic verification remains the correctness safety net.
-        if not self._notification_hint and not self.has_pending_change and not verify_due:
+        if self.notification_gated and not self._notification_hint and not self.has_pending_change and not verify_due:
             return None
         self._notification_hint = False
 

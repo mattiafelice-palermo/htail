@@ -17,6 +17,8 @@ import urllib.request
 from . import VERSION
 from . import core
 from .input import InputReader, InputEvent, MouseEvent
+from .fsnotify import FsEvents, NativeWatchHub
+from .globwatch import DynamicGlob, has_magic
 from .layout import LAYOUTS, Rect, pane_rects, resolve_auto
 from .pane import Pane, StreamPane
 from .sources import CommandFollower, StreamFollower
@@ -46,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Follow one or more text files in an interactive highlighted terminal viewer.",
     )
     parser.add_argument("--version", action="version", version=f"htail {VERSION}")
-    parser.add_argument("files", type=Path, nargs="*", help="text files to watch; use '-' for stdin")
+    parser.add_argument("files", type=Path, nargs="*", help="text files or quoted glob patterns to watch; use '-' for stdin")
+    parser.add_argument("--glob", dest="globs", action="append", default=[], metavar="PATTERN", help="dynamically add files matching PATTERN; repeatable")
     parser.add_argument("--exec", dest="commands", action="append", default=[], metavar="COMMAND", help="run a shell command and watch its merged stdout/stderr; repeatable")
     parser.add_argument("--pid", type=int, metavar="PID", help="exit after this process is no longer running")
     parser.add_argument("--install", nargs="?", const=core.DEFAULT_INSTALL_COMMAND, metavar="NAME")
@@ -80,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable terminal mouse tracking (keyboard pane selection still works)",
     )
+    parser.add_argument("--no-native-watch", action="store_true", help="disable native filesystem notifications and use polling only")
     return parser
 
 
@@ -298,6 +302,12 @@ def _panel_lines(title: str, content: Sequence[str], width: int, height: int, co
     return out
 
 
+def _changed_frame_rows(previous: Optional[Sequence[str]], current: Sequence[str]) -> List[int]:
+    if previous is None or len(previous) != len(current):
+        return list(range(len(current)))
+    return [i for i, (old, new) in enumerate(zip(previous, current)) if old != new]
+
+
 def _overlay_modal(background: Sequence[str], panel: Sequence[str], width: int, height: int, color: bool) -> List[str]:
     out: List[str] = []
     for y in range(height):
@@ -326,7 +336,25 @@ class MultiApp:
         self.color = color
         self.display_filter = display_filter
         self.update_service = update_service
-        self.paths = list(args.files)
+        raw_paths = list(args.files)
+        self.glob_trackers = [
+            DynamicGlob(str(path))
+            for path in raw_paths
+            if str(path) != "-" and has_magic(str(path))
+        ]
+        self.glob_trackers.extend(DynamicGlob(pattern) for pattern in args.globs)
+        self.paths = [
+            path for path in raw_paths
+            if str(path) == "-" or not has_magic(str(path))
+        ]
+        self.native_watch = NativeWatchHub(enabled=not args.no_native_watch)
+        setattr(self.args, "notification_gated", self.native_watch.available)
+        self._known_file_paths = set()
+        self._next_glob_scan = 0.0
+        for tracker in self.glob_trackers:
+            self.native_watch.add_directory(tracker.root)
+            self.paths.extend(tracker.scan())
+
         self.followers: List[object] = []
         self.panes: List[Pane] = []
         self.stream = StreamPane(color, args.idle_warn)
@@ -354,6 +382,12 @@ class MultiApp:
         self.last_status_second: Optional[int] = None
         self.last_rects: List[Tuple[int, Rect]] = []
         self.dirty = True
+        self.prompt_mode: Optional[str] = None
+        self.prompt_buffer = ""
+        self._last_frame: Optional[List[str]] = None
+        self._last_frame_geometry: Optional[Tuple[int, int]] = None
+        self.render_rows_written = 0
+        self.render_frames = 0
 
         for path in self.paths:
             if str(path) == "-":
@@ -379,6 +413,9 @@ class MultiApp:
                 pane.add_system_line(highlighter.warning, warning=True)
             self.panes.append(pane)
             self.followers.append(follower)
+            if str(path) != "-":
+                self._known_file_paths.add(Path(os.path.abspath(os.fspath(path))))
+                self.native_watch.add_file(path)
 
         for command_index, command in enumerate(args.commands, start=1):
             pseudo = Path(f"command-{command_index}.log")
@@ -390,6 +427,48 @@ class MultiApp:
             pane.set_message(f"running pid {follower.process.pid}", 4.0)
             self.panes.append(pane)
             self.followers.append(follower)
+
+    def _add_dynamic_file(self, path: Path) -> bool:
+        normalized = Path(os.path.abspath(os.fspath(path)))
+        if normalized in self._known_file_paths:
+            return False
+        highlighter = core.SyntaxHighlighter(path, self.args.syntax, self.color)
+        pane = Pane(path, highlighter, self.display_filter, self.color, self.args.idle_warn)
+        follower = FileFollower(path, self.args)
+        notice = follower.initialize_if_available()
+        if notice and notice.initial_tail is not None:
+            pane.add_initial(notice.initial_tail)
+            pane.set_snapshot(follower.previous)
+            if notice.initial_tail:
+                self._stream_initial(len(self.panes), pane, notice.initial_tail)
+        else:
+            pane.waiting = True
+            if notice and notice.kind == "error":
+                pane.add_system_line(notice.text, warning=True)
+        if highlighter.warning:
+            pane.add_system_line(highlighter.warning, warning=True)
+        self.paths.append(path)
+        self.panes.append(pane)
+        self.followers.append(follower)
+        self._known_file_paths.add(normalized)
+        self.native_watch.add_file(path)
+        self.set_message(f"glob added {pane.name}", 4.0)
+        return True
+
+    def _refresh_globs(self, now: float, events: Optional[FsEvents] = None) -> None:
+        if not self.glob_trackers:
+            return
+        event_wakeup = bool(events and (events.paths or events.directories))
+        if not event_wakeup and now < self._next_glob_scan:
+            return
+        self._next_glob_scan = now + 2.0
+        for tracker in self.glob_trackers:
+            self.native_watch.add_directory(tracker.root)
+            for path in tracker.scan():
+                self._add_dynamic_file(path)
+
+    def close_native_watch(self) -> None:
+        self.native_watch.close()
 
     def _stream_initial(self, index: int, pane: Pane, raw_lines: Sequence[str]) -> None:
         visible = [line for line in raw_lines if self.display_filter.accepts(line)]
@@ -475,6 +554,27 @@ class MultiApp:
             out.append(line)
         return out
 
+    def _prompt_lines(self, width: int, height: int) -> List[str]:
+        mode = self.prompt_mode or "search"
+        title = "Regex search" if mode == "search" else "Regex highlight"
+        prefix = "/" if mode == "search" else "highlight: "
+        content = [
+            core.paint(prefix + self.prompt_buffer, core.BOLD_LIGHT_CYAN, self.color),
+            "",
+            "Enter apply · Esc cancel · Backspace edit",
+        ]
+        if mode == "highlight":
+            content.append("Use H from the viewer to clear the active highlight.")
+        return _panel_lines(title, content, width, height, self.color)
+
+    def _active_pane_geometry(self) -> Tuple[int, int]:
+        target = -1 if self.layout == "stream" else self.focus
+        rect = next((rect for index, rect in self.last_rects if index == target), None)
+        if rect is None:
+            width, height, _ = self.content_dimensions()
+            return max(1, width - 2), max(1, height - 2)
+        return max(1, rect.width - 2), max(1, rect.height - 2)
+
     def _help_lines(self, width: int, height: int) -> List[str]:
         content = [
             core.paint(f"htail {VERSION} — multi-file controls", core.BOLD, self.color),
@@ -490,6 +590,8 @@ class MultiApp:
             "  z                  maximize focused pane / restore layout",
             "",
             "Focused pane",
+            "  /                  regex search; n / N next / previous match",
+            "  h                  set regex highlight; H clears it",
             "  ↑ ↓ / PgUp PgDn    scroll",
             "  [ / ]              previous / next update",
             "  f                  freshest update",
@@ -634,15 +736,15 @@ class MultiApp:
         elif self.update_release is not None:
             parts.append(f"UPDATE {self.update_release.version}")
         top = " · ".join(parts)
-        controls = "Tab pane · click focus · l layout · z max · ↑↓/Pg scroll · [/] update · f newest · p pause · u check · q quit · ? help"
+        controls = "/ search · n/N match · h highlight · Tab pane · l layout · ↑↓/Pg scroll · [/] update · f newest · p pause · u update · q quit · ? help"
         return [top, controls]
 
-    def render(self) -> None:
-        if not self.dirty:
-            return
+    def _frame_rows(self) -> Tuple[int, List[str]]:
         width, body_height, footer_height = self.content_dimensions()
         base_body = self._pane_boxes(width, body_height)
-        if self.update_confirm_active:
+        if self.prompt_mode:
+            body = _overlay_modal(base_body, self._prompt_lines(width, body_height), width, body_height, self.color)
+        elif self.update_confirm_active:
             body = _overlay_modal(base_body, self._update_lines(width, body_height), width, body_height, self.color)
         elif self.layout_menu:
             body = _overlay_modal(base_body, self._layout_menu_lines(width, body_height), width, body_height, self.color)
@@ -651,14 +753,9 @@ class MultiApp:
         else:
             body = base_body
 
-        sys.stdout.write(core.CURSOR_HOME)
-        for row in range(body_height):
-            sys.stdout.write(core.CLEAR_LINE)
-            sys.stdout.write(_pad(body[row] if row < len(body) else "", width))
-            if row < body_height - 1:
-                sys.stdout.write("\n")
-
-        if self.update_confirm_active:
+        if self.prompt_mode:
+            status = ["REGEX · Enter apply · Esc cancel", "Background watching continues while this dialog is open"]
+        elif self.update_confirm_active:
             status = ["UPDATE · y confirm · n cancel", "Background watching continues while this dialog is open"]
         elif self.layout_menu:
             status = ["LAYOUT · a/r/c/g/s choose · l/Esc cancel", "Background watching continues while this dialog is open"]
@@ -667,23 +764,45 @@ class MultiApp:
         else:
             status = self._status_lines(width, body_height)
 
+        frame = [_pad(body[row] if row < len(body) else "", width) for row in range(body_height)]
         for i in range(footer_height):
-            sys.stdout.write("\n" + core.CLEAR_LINE)
             line = status[i] if i < len(status) else ""
+            line = _pad(core.clip_ansi(line, width), width)
             if self.color:
-                sys.stdout.write(core.REVERSE + core.clip_ansi(line, width) + core.RESET)
-            else:
-                sys.stdout.write(core.clip_ansi(line, width))
-        sys.stdout.flush()
+                line = core.REVERSE + line + core.RESET
+            frame.append(line)
+        return width, frame
+
+    def render(self) -> None:
+        if not self.dirty:
+            return
+        width, frame = self._frame_rows()
+        geometry = (width, len(frame))
+        full = self._last_frame is None or self._last_frame_geometry != geometry
+        changed = list(range(len(frame))) if full else _changed_frame_rows(self._last_frame, frame)
+        if full:
+            sys.stdout.write(core.CLEAR_SCREEN)
+        for row in changed:
+            sys.stdout.write(f"\033[{row + 1};1H" + core.RESET + core.CLEAR_LINE)
+            sys.stdout.write(frame[row] + core.RESET)
+        if changed:
+            sys.stdout.flush()
+        self.render_rows_written += len(changed)
+        self.render_frames += 1
+        self._last_frame = list(frame)
+        self._last_frame_geometry = geometry
         self.dirty = False
 
     def __enter__(self) -> "MultiApp":
         sys.stdout.write(core.ALT_SCREEN_ON + core.HIDE_CURSOR + core.CLEAR_SCREEN + core.CURSOR_HOME)
         sys.stdout.flush()
+        self._last_frame = None
+        self._last_frame_geometry = None
         self.dirty = True
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        self.close_native_watch()
         for follower in self.followers:
             close = getattr(follower, "close", None)
             if close is not None:
@@ -727,6 +846,40 @@ class MultiApp:
             self.dirty = True
 
     def handle_input(self, event: InputEvent) -> bool:
+        if self.prompt_mode and not isinstance(event, MouseEvent):
+            key = event
+            if key == "ESC":
+                self.prompt_mode = None
+                self.prompt_buffer = ""
+                self.dirty = True
+                return False
+            if key in ("\r", "\n"):
+                pane = self.active_pane()
+                flags = re.IGNORECASE if self.args.ignore_case else 0
+                if self.prompt_mode == "search":
+                    error = pane.set_search(self.prompt_buffer, flags)
+                    if error is None:
+                        inner_w, body_h = self._active_pane_geometry()
+                        pane.search_next(False, inner_w, body_h)
+                else:
+                    error = pane.set_highlight(self.prompt_buffer, flags)
+                    if error is None:
+                        pane.set_message(f"highlight /{self.prompt_buffer}/" if self.prompt_buffer else "regex highlight cleared")
+                if error is not None:
+                    self.set_message(f"invalid regex: {error}", 5.0)
+                self.prompt_mode = None
+                self.prompt_buffer = ""
+                self.dirty = True
+                return False
+            if key in ("\x7f", "\b"):
+                self.prompt_buffer = self.prompt_buffer[:-1]
+                self.dirty = True
+                return False
+            if isinstance(key, str) and len(key) == 1 and key.isprintable():
+                self.prompt_buffer += key
+                self.dirty = True
+            return False
+
         if isinstance(event, MouseEvent):
             if not (self.help_active or self.layout_menu or self.update_confirm_active):
                 self.handle_mouse(event)
@@ -802,6 +955,27 @@ class MultiApp:
                 self.dirty = True
             return False
 
+        if key == "/":
+            self.prompt_mode = "search"
+            self.prompt_buffer = self.active_pane().search_pattern
+            self.dirty = True
+            return False
+        if key == "h":
+            self.prompt_mode = "highlight"
+            self.prompt_buffer = self.active_pane().highlight_pattern
+            self.dirty = True
+            return False
+        if key == "H":
+            self.active_pane().clear_highlight()
+            self.dirty = True
+            return False
+        if key in ("n", "N"):
+            pane = self.active_pane()
+            inner_w, body_h = self._active_pane_geometry()
+            pane.search_next(key == "N", inner_w, body_h)
+            self.dirty = True
+            return False
+
         if key in ("u", "U"):
             if self.update_release is not None:
                 self.update_confirm_active = True
@@ -850,8 +1024,12 @@ class MultiApp:
         if changed and done:
             self.last_update_check_monotonic = now
             if release is not None:
-                self.update_manual_check_pending = False
-                self.set_message(f"update {release.version} available — press u", 5.0)
+                if self.update_manual_check_pending:
+                    self.update_manual_check_pending = False
+                    self.update_confirm_active = True
+                    self.dirty = True
+                else:
+                    self.set_message(f"update {release.version} available — press u", 5.0)
             elif self.update_manual_check_pending:
                 self.update_manual_check_pending = False
                 self.set_message(f"update check failed: {error}" if error else "already on the latest release", 4.0)
@@ -870,6 +1048,26 @@ class MultiApp:
             self.dirty = True
 
     def process_watchers(self, now: float) -> None:
+        events = self.native_watch.poll()
+        if self.native_watch.available:
+            exact_paths = {Path(os.path.abspath(os.fspath(path))) for path in events.paths}
+            dirty_dirs = {Path(os.path.abspath(os.fspath(path))) for path in events.directories}
+            for follower in self.followers:
+                if not isinstance(follower, FileFollower):
+                    continue
+                path = Path(os.path.abspath(os.fspath(follower.path)))
+                if self.native_watch.backend == "inotify":
+                    if path in exact_paths or path.parent in exact_paths:
+                        follower.notify()
+                elif path.parent in dirty_dirs:
+                    follower.notify()
+        else:
+            # Poll fallback intentionally preserves the exact v0.9 scheduling.
+            for follower in self.followers:
+                if isinstance(follower, FileFollower):
+                    follower.notify()
+
+        self._refresh_globs(now, events)
         for index, follower in enumerate(self.followers):
             result = follower.poll(now)
             if result is None:
@@ -1118,12 +1316,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[htail] {message}", file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
 
-    if not args.files and not args.commands and not sys.stdin.isatty():
+    if not args.files and not args.commands and not args.globs and not sys.stdin.isatty():
         args.files = [Path("-")]
 
-    if not args.files and not args.commands:
+    if not args.files and not args.commands and not args.globs:
         print(f"htail {VERSION}")
-        print("Usage: ht FILE [FILE ...] | producer | ht | ht --exec COMMAND")
+        print("Usage: ht FILE [FILE ...] | ht --glob 'logs/*.log' | producer | ht | ht --exec COMMAND")
         print("Example: ht reviewer.md implementer.md")
         return 0
 
@@ -1135,7 +1333,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     core.maybe_offer_pygments_install(args, color)
     has_stdin_source = any(str(path) == "-" for path in args.files)
-    interactive = sys.stdout.isatty() and (sys.stdin.isatty() or has_stdin_source or bool(args.commands))
+    interactive = sys.stdout.isatty() and (sys.stdin.isatty() or has_stdin_source or bool(args.commands) or bool(args.globs))
     if interactive:
         return run_interactive(args, color, display_filter, update_service)
     return run_noninteractive(args, color, display_filter)

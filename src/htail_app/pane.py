@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import time
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Pattern, Sequence, Tuple
 
 from . import core
 
@@ -22,6 +22,35 @@ def _pad_ansi(text: str, width: int) -> str:
     visible = len(core.strip_ansi(text))
     if visible < width:
         text += " " * (width - visible)
+    return text
+
+
+def _inject_regex_style(text: str, pattern: Optional[Pattern[str]], on: str, off: str) -> str:
+    """Apply an SGR attribute to visible regex spans without destroying syntax ANSI."""
+    if pattern is None:
+        return text
+    plain = core.strip_ansi(text)
+    spans = [(m.start(), m.end()) for m in pattern.finditer(plain) if m.end() > m.start()]
+    if not spans:
+        return text
+
+    boundaries: List[int] = [0] * (len(plain) + 1)
+    raw = visible = 0
+    while raw < len(text) and visible < len(plain):
+        match = core.ANSI_RE.match(text, raw)
+        if match:
+            raw = match.end()
+            continue
+        boundaries[visible] = raw
+        visible += 1
+        raw += 1
+    boundaries[visible] = raw
+
+    for start, end in reversed(spans):
+        raw_start = boundaries[start]
+        raw_end = boundaries[end]
+        text = text[:raw_end] + off + text[raw_end:]
+        text = text[:raw_start] + on + text[raw_start:]
     return text
 
 
@@ -73,8 +102,16 @@ class Pane:
         self._snapshot_layout_dirty = True
         self._snapshot_layout_width: Optional[int] = None
         self._snapshot_visual_lines: List[str] = []
+        self._snapshot_source_to_visual: Dict[int, int] = {}
+        self._snapshot_visual_to_source: List[Optional[int]] = []
         self._snapshot_top = 0
         self._snapshot_anchor_pending = False
+
+        self.search_pattern = ""
+        self.search_regex: Optional[Pattern[str]] = None
+        self._search_last_target: Optional[int] = None
+        self.highlight_pattern = ""
+        self.highlight_regex: Optional[Pattern[str]] = None
 
         self._wrap_cache: "OrderedDict[Tuple[int, str], Tuple[str, ...]]" = OrderedDict()
         self._render_cache: "OrderedDict[str, str]" = OrderedDict()
@@ -119,6 +156,119 @@ class Pane:
                 return rendered
         return self.highlighter.render_lines(raw_visible)
 
+    def _apply_regex_marks(self, row: str) -> str:
+        if not self.color:
+            return row
+        # Underline is the persistent user highlight; reverse video is the
+        # current search expression. Attribute-specific off codes preserve the
+        # foreground/bold syntax styles already present in the row.
+        row = _inject_regex_style(row, self.highlight_regex, "\x1b[4m", "\x1b[24m")
+        row = _inject_regex_style(row, self.search_regex, "\x1b[7m", "\x1b[27m")
+        return row
+
+    def set_search(self, expression: str, flags: int = 0) -> Optional[str]:
+        if not expression:
+            self.search_pattern = ""
+            self.search_regex = None
+            self._search_last_target = None
+            self._mark_layout_dirty()
+            self._snapshot_layout_dirty = True
+            return None
+        try:
+            compiled = re.compile(expression, flags)
+        except re.error as exc:
+            return str(exc)
+        self.search_pattern = expression
+        self.search_regex = compiled
+        self._search_last_target = None
+        self._mark_layout_dirty()
+        self._snapshot_layout_dirty = True
+        return None
+
+    def set_highlight(self, expression: str, flags: int = 0) -> Optional[str]:
+        if not expression:
+            self.clear_highlight()
+            return None
+        try:
+            compiled = re.compile(expression, flags)
+        except re.error as exc:
+            return str(exc)
+        self.highlight_pattern = expression
+        self.highlight_regex = compiled
+        self._mark_layout_dirty()
+        self._snapshot_layout_dirty = True
+        return None
+
+    def clear_highlight(self) -> None:
+        self.highlight_pattern = ""
+        self.highlight_regex = None
+        self._mark_layout_dirty()
+        self._snapshot_layout_dirty = True
+        self.set_message("regex highlight cleared")
+
+    def search_next(self, reverse: bool, width: int, body_height: int) -> bool:
+        pattern = self.search_regex
+        if pattern is None:
+            self.set_message("no active search")
+            return False
+
+        width = max(1, width)
+        body_height = max(1, body_height)
+        if self.snapshot_raw:
+            self.prefer_snapshot = True
+            self._ensure_snapshot_layout(width)
+            candidates = [
+                i for i, line in enumerate(self.snapshot_raw)
+                if self.display_filter.accepts(line)
+                and pattern.search(line.rstrip("\r\n")) is not None
+                and i in self._snapshot_source_to_visual
+            ]
+            if not candidates:
+                self.set_message(f"no match: /{self.search_pattern}/")
+                return False
+            current_source = self._search_last_target if self._search_last_target is not None else -1
+            if self._search_last_target is None and self._snapshot_visual_to_source:
+                start = min(max(0, self._snapshot_top), len(self._snapshot_visual_to_source) - 1)
+                for source in self._snapshot_visual_to_source[start:]:
+                    if source is not None:
+                        current_source = source
+                        break
+            if reverse:
+                prior = [i for i in candidates if i < current_source]
+                target = prior[-1] if prior else candidates[-1]
+            else:
+                later = [i for i in candidates if i > current_source]
+                target = later[0] if later else candidates[0]
+            self._snapshot_top = min(
+                self._snapshot_source_to_visual[target],
+                self._snapshot_max_top(body_height),
+            )
+            self._search_last_target = target
+            position = candidates.index(target) + 1
+            self.set_message(f"match {position}/{len(candidates)}: /{self.search_pattern}/")
+            return True
+
+        self._ensure_layout(width)
+        candidates = [
+            i for i, line in enumerate(self.lines)
+            if pattern.search(core.strip_ansi(line)) is not None
+        ]
+        if not candidates:
+            self.set_message(f"no match: /{self.search_pattern}/")
+            return False
+        current = self._search_last_target if self._search_last_target is not None else self._logical_at_top()
+        if reverse:
+            prior = [i for i in candidates if i < current]
+            target = prior[-1] if prior else candidates[-1]
+        else:
+            later = [i for i in candidates if i > current]
+            target = later[0] if later else candidates[0]
+        self.top = min(self._logical_to_visual[target], self._max_top(body_height))
+        self._search_last_target = target
+        position = candidates.index(target) + 1
+        self.set_message(f"match {position}/{len(candidates)}: /{self.search_pattern}/")
+        return True
+
     def set_message(self, text: str, duration: float = 2.5) -> None:
         self.message = text
         self.message_until = time.monotonic() + duration
@@ -147,7 +297,7 @@ class Pane:
 
         for logical_index, line in enumerate(self.lines):
             self._logical_to_visual.append(len(self._visual_lines))
-            wrapped = self._wrap_cached(line, width)
+            wrapped = self._wrap_cached(self._apply_regex_marks(line), width)
             self._visual_lines.extend(wrapped)
             self._visual_to_logical.extend([logical_index] * len(wrapped))
 
@@ -182,6 +332,7 @@ class Pane:
     ) -> None:
         self.snapshot_raw = list(raw_lines)
         self.snapshot_changed = set(changed_indices)
+        self._search_last_target = None
         self.snapshot_update_header = update_header
         self._snapshot_layout_dirty = True
         if prefer:
@@ -198,6 +349,8 @@ class Pane:
 
         self._snapshot_layout_width = width
         self._snapshot_layout_dirty = False
+        self._snapshot_source_to_visual = {}
+        self._snapshot_visual_to_source = []
         indexed = [
             (index, line)
             for index, line in enumerate(self.snapshot_raw)
@@ -213,15 +366,23 @@ class Pane:
             changed = source_index in self.snapshot_changed
             if changed and self.snapshot_update_header and not header_inserted:
                 anchor = len(visual)
-                visual.extend(self._wrap_cached(self.snapshot_update_header, width))
+                header_rows = self._wrap_cached(self.snapshot_update_header, width)
+                visual.extend(header_rows)
+                self._snapshot_visual_to_source.extend([None] * len(header_rows))
                 header_inserted = True
             if changed:
                 row = core.paint("▌ ", core.BOLD_LIGHT_CYAN, self.color) + row
-            visual.extend(self._wrap_cached(row, width))
+            row = self._apply_regex_marks(row)
+            self._snapshot_source_to_visual[source_index] = len(visual)
+            wrapped_rows = self._wrap_cached(row, width)
+            visual.extend(wrapped_rows)
+            self._snapshot_visual_to_source.extend([source_index] * len(wrapped_rows))
 
         if self.snapshot_update_header and not header_inserted:
             anchor = len(visual)
-            visual.extend(self._wrap_cached(self.snapshot_update_header, width))
+            header_rows = self._wrap_cached(self.snapshot_update_header, width)
+            visual.extend(header_rows)
+            self._snapshot_visual_to_source.extend([None] * len(header_rows))
 
         self._snapshot_visual_lines = visual
         if self._snapshot_anchor_pending:
