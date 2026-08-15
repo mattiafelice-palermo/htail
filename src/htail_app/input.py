@@ -13,34 +13,25 @@ MOUSE_DISABLE = "\033[?1000l\033[?1006l"
 
 @dataclass(frozen=True)
 class MouseEvent:
-    x: int  # zero-based terminal column
-    y: int  # zero-based terminal row
-    button: str  # left, wheel_up, wheel_down, other
+    x: int
+    y: int
+    button: str
     pressed: bool = True
 
 
 InputEvent = Union[str, MouseEvent]
-
-
 _SGR_MOUSE = re.compile(r"^\x1b\[<(\d+);(\d+);(\d+)([Mm])$")
 
 
 def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
     mapping = {
-        "\x1b[A": "UP",
-        "\x1b[B": "DOWN",
-        "\x1b[5~": "PAGEUP",
-        "\x1b[6~": "PAGEDOWN",
-        "\x1b[H": "HOME",
-        "\x1b[F": "END",
-        "\x1bOH": "HOME",
-        "\x1bOF": "END",
-        "\x1b[Z": "SHIFT_TAB",
+        "\x1b[A": "UP", "\x1b[B": "DOWN", "\x1b[5~": "PAGEUP",
+        "\x1b[6~": "PAGEDOWN", "\x1b[H": "HOME", "\x1b[F": "END",
+        "\x1bOH": "HOME", "\x1bOF": "END", "\x1b[Z": "SHIFT_TAB",
         "\x1b": "ESC",
     }
     if seq in mapping:
         return mapping[seq]
-
     match = _SGR_MOUSE.match(seq)
     if not match:
         return None
@@ -59,29 +50,40 @@ def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
 
 
 class InputReader:
-    """Non-blocking keyboard and SGR mouse input reader."""
+    """Non-blocking keyboard/SGR mouse reader, including piped-stdin sessions."""
 
     def __init__(self, mouse: bool = True) -> None:
         self.mouse = mouse
         self.enabled = False
         self._fd: Optional[int] = None
+        self._owned_fd: Optional[int] = None
         self._old_termios = None
 
     def __enter__(self) -> "InputReader":
-        if not sys.stdin.isatty():
+        if os.name == "nt":
+            # msvcrt reads the console keyboard even when standard input is
+            # redirected in the usual Windows Terminal/Console setup.
+            self.enabled = bool(sys.stdout.isatty())
             return self
-        self.enabled = True
-        if os.name != "nt":
-            try:
-                import termios
-                import tty
 
+        try:
+            import termios
+            import tty
+
+            if sys.stdin.isatty():
                 self._fd = sys.stdin.fileno()
-                self._old_termios = termios.tcgetattr(self._fd)
-                tty.setcbreak(self._fd)
-            except Exception:
-                self.enabled = False
-        if self.enabled and self.mouse and os.name != "nt":
+            else:
+                # A pipeline owns fd 0. Use the controlling terminal for UI
+                # keys so `producer | ht` remains fully interactive.
+                self._owned_fd = os.open("/dev/tty", os.O_RDWR | getattr(os, "O_NOCTTY", 0))
+                self._fd = self._owned_fd
+            self._old_termios = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+            self.enabled = True
+        except Exception:
+            self.enabled = False
+
+        if self.enabled and self.mouse:
             sys.stdout.write(MOUSE_ENABLE)
             sys.stdout.flush()
         return self
@@ -93,44 +95,40 @@ class InputReader:
         if os.name != "nt" and self._old_termios is not None and self._fd is not None:
             try:
                 import termios
-
                 termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_termios)
             except Exception:
                 pass
+        if self._owned_fd is not None:
+            try:
+                os.close(self._owned_fd)
+            except OSError:
+                pass
+            self._owned_fd = None
 
     def poll(self) -> Optional[InputEvent]:
         if not self.enabled:
             return None
-        if os.name == "nt":
-            return self._poll_windows()
-        return self._poll_posix()
+        return self._poll_windows() if os.name == "nt" else self._poll_posix()
 
     def _poll_windows(self) -> Optional[InputEvent]:
         try:
             import msvcrt
-
             if not msvcrt.kbhit():
                 return None
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0") and msvcrt.kbhit():
                 special = msvcrt.getwch()
-                return {
-                    "H": "UP",
-                    "P": "DOWN",
-                    "I": "PAGEUP",
-                    "Q": "PAGEDOWN",
-                    "G": "HOME",
-                    "O": "END",
-                }.get(special)
-            return ch
+                return {"H": "UP", "P": "DOWN", "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END"}.get(special)
+            return "TAB" if ch == "\t" else ch
         except Exception:
             return None
 
     def _poll_posix(self) -> Optional[InputEvent]:
         try:
             import select
-
-            fd = self._fd if self._fd is not None else sys.stdin.fileno()
+            if self._fd is None:
+                return None
+            fd = self._fd
             ready, _, _ = select.select([fd], [], [], 0)
             if not ready:
                 return None
@@ -141,9 +139,7 @@ class InputReader:
 
             ch = read_char()
             if ch != "\x1b":
-                if ch == "\t":
-                    return "TAB"
-                return ch
+                return "TAB" if ch == "\t" else ch
 
             seq = ch
             deadline = time.monotonic() + 0.03
@@ -159,4 +155,3 @@ class InputReader:
             return parse_escape_sequence(seq)
         except Exception:
             return None
-
