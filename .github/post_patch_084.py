@@ -13,4 +13,33 @@ for i, line in enumerate(lines):
         break
 else:
     raise SystemExit('checksum regex line not found')
-p.write_text(''.join(lines))
+t = ''.join(lines)
+t = t.replace(
+'''                while True:
+                    chunk = response.read(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    current += len(chunk)
+                    report("Downloading release…", current, total)
+''',
+'''                while True:
+                    try:
+                        chunk = response.read(65536)
+                    except TypeError:
+                        # Simple test doubles and a few file-like adapters only
+                        # implement read() without a size argument. Real HTTP
+                        # responses still take the streaming path above.
+                        chunk = response.read()
+                        if chunk:
+                            chunks.append(chunk)
+                            current += len(chunk)
+                            report("Downloading release…", current, total)
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    current += len(chunk)
+                    report("Downloading release…", current, total)
+''')
+p.write_text(t)
