@@ -26,6 +26,10 @@ from .watcher import FileFollower, WatchNotice, WatchUpdate
 # packaged application version rather than the legacy source snapshot.
 core.HTAIL_VERSION = VERSION
 
+INTERACTIVE_FRAME_INTERVAL = 1.0 / 60.0
+MIN_UPDATE_MODAL_SECONDS = 0.60
+MIN_UPDATE_COMPLETE_SECONDS = 0.35
+
 
 def executable_path() -> Path:
     """Return the self-updatable wrapper rather than the cached package payload."""
@@ -299,9 +303,12 @@ class MultiApp:
         self.update_installing = False
         self.update_install_status = ""
         self.update_install_progress: Optional[Tuple[int, Optional[int]]] = None
+        self.update_overall_progress = 0.0
+        self.update_progress_started_at: Optional[float] = None
         self.update_install_result: Optional[Tuple[bool, str]] = None
         self.update_release: Optional[core.ReleaseInfo] = None
         self.pending_restart: Optional[Tuple[Path, List[str], str]] = None
+        self.pending_restart_at: Optional[float] = None
         self.update_check_done = False
         self.update_check_error: Optional[str] = None
         self.update_manual_check_pending = False
@@ -470,20 +477,17 @@ class MultiApp:
                 "",
                 self.update_install_status or "Preparing update…",
             ]
+            frac = max(0.0, min(1.0, self.update_overall_progress))
+            bar_w = max(12, min(40, width - 24))
+            filled = int(round(bar_w * frac))
+            bar = "[" + ("█" * filled) + ("░" * max(0, bar_w - filled)) + "]"
+            content.append(core.paint(bar, core.BOLD_LIGHT_CYAN, self.color) + f"  {frac*100:5.1f}%")
             if self.update_install_progress is not None:
                 current, total = self.update_install_progress
                 if total and total > 0:
-                    frac = max(0.0, min(1.0, current / total))
-                    bar_w = max(12, min(40, width - 24))
-                    filled = int(round(bar_w * frac))
-                    bar = "[" + ("█" * filled) + ("░" * max(0, bar_w - filled)) + "]"
-                    content.append(core.paint(bar, core.BOLD_LIGHT_CYAN, self.color) + f"  {frac*100:5.1f}%")
                     content.append(f"{current:,} / {total:,} bytes")
-                else:
-                    step = (int(time.monotonic() * 8) % 12)
-                    spinner = ''.join('█' if i == step else '░' for i in range(12))
-                    content.append(core.paint(f"[{spinner}]", core.BOLD_LIGHT_CYAN, self.color) + "  downloading…")
-                    content.append(f"{current:,} bytes")
+                elif current is not None:
+                    content.append(f"{current:,} bytes downloaded")
             content.extend(["", "All watched files will reopen automatically when the update completes."])
             return _panel_lines("Installing update", content, width, height, self.color)
         features, fixes, other = core.release_note_sections(release.notes)
@@ -519,6 +523,19 @@ class MultiApp:
         def progress(stage: str, current: Optional[int], total: Optional[int]) -> None:
             self.update_install_status = stage
             self.update_install_progress = None if current is None else (current, total)
+            if stage.startswith("Downloading"):
+                if current is not None and total and total > 0:
+                    self.update_overall_progress = 0.05 + 0.70 * max(0.0, min(1.0, current / total))
+                else:
+                    self.update_overall_progress = max(self.update_overall_progress, 0.10)
+            elif stage.startswith("Verifying"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.80)
+            elif stage.startswith("Backing up"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.90)
+            elif stage.startswith("Installing") or stage.startswith("Replacing"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.97)
+            else:
+                self.update_overall_progress = max(self.update_overall_progress, 0.02)
             self.dirty = True
 
         try:
@@ -527,10 +544,20 @@ class MultiApp:
         except Exception as exc:
             ok, message = False, f"update failed: {exc}"
 
+        now = time.monotonic()
         self.update_install_result = (ok, message)
-        self.update_installing = False
         if ok:
+            self.update_install_status = "Update complete — restarting…"
+            self.update_install_progress = None
+            self.update_overall_progress = 1.0
             self.pending_restart = (target, list(sys.argv[1:]), message)
+            started = self.update_progress_started_at if self.update_progress_started_at is not None else now
+            self.pending_restart_at = max(started + MIN_UPDATE_MODAL_SECONDS, now + MIN_UPDATE_COMPLETE_SECONDS)
+            # Keep the modal in its installing state until the delayed restart
+            # so a very fast 70 KB download still visibly reaches 100%.
+            self.update_installing = True
+        else:
+            self.update_installing = False
         self.dirty = True
 
     def _status_lines(self, width: int, body_height: int) -> List[str]:
@@ -654,6 +681,9 @@ class MultiApp:
                 self.update_install_result = None
                 self.update_install_status = "Preparing update…"
                 self.update_install_progress = None
+                self.update_overall_progress = 0.02
+                self.update_progress_started_at = time.monotonic()
+                self.pending_restart_at = None
                 self.dirty = True
                 threading.Thread(target=self._install_worker, args=(self.update_release,), daemon=True, name="htail-install").start()
             return False
@@ -766,10 +796,7 @@ class MultiApp:
         if self.update_install_result is not None and not self.update_installing:
             ok, message = self.update_install_result
             self.update_install_result = None
-            if ok:
-                # restart handled by run_interactive after this tick
-                self.set_message(message, 4.0)
-            else:
+            if not ok:
                 self.update_confirm_active = False
                 self.set_message(message, 6.0)
         second = int(now)
@@ -821,6 +848,7 @@ class MultiApp:
                     result.current_snapshot,
                     result.changed_new_indices,
                     prefer=not pane.paused,
+                    update_header=header,
                 )
                 self.stream.add_source_update(index, pane.name, header, rendered, result.now_monotonic)
                 self.dirty = True
@@ -874,14 +902,13 @@ def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.
     app = MultiApp(args, color, display_filter, update_service)
     update_service.start()
     restart: Optional[core.RestartRequested] = None
+    next_watch_poll = 0.0
     try:
         with app, InputReader(mouse=not args.no_mouse) as reader:
             while True:
-                # Drain a bounded burst of queued terminal input before the
-                # watcher/render pass. A 100 ms file poll interval should not
-                # collapse three quick arrow presses into one sluggish step.
+                frame_started = time.monotonic()
                 quit_requested = False
-                for _ in range(64):
+                for _ in range(128):
                     event = reader.poll()
                     if event is None:
                         break
@@ -890,14 +917,20 @@ def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.
                         break
                 if quit_requested:
                     break
+
                 now = time.monotonic()
-                app.process_watchers(now)
+                if now >= next_watch_poll:
+                    app.process_watchers(now)
+                    next_watch_poll = now + args.interval
                 app.tick(now)
-                if app.pending_restart is not None:
+                if app.pending_restart is not None and (
+                    app.pending_restart_at is None or now >= app.pending_restart_at
+                ):
                     target, argv, message = app.pending_restart
                     raise core.RestartRequested(target, argv, message)
                 app.render()
-                time.sleep(args.interval)
+                elapsed = time.monotonic() - frame_started
+                time.sleep(max(0.0, INTERACTIVE_FRAME_INTERVAL - elapsed))
     except core.RestartRequested as exc:
         restart = exc
     except KeyboardInterrupt:

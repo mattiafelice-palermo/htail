@@ -116,9 +116,11 @@ class MultiAppInteractionTests(unittest.TestCase):
                 app.handle_input("y")
 
             install.assert_called_once()
-            self.assertFalse(app.update_installing)
+            self.assertTrue(app.update_installing)
             self.assertEqual(app.update_install_result, (True, "updated htail"))
+            self.assertEqual(app.update_overall_progress, 1.0)
             self.assertIsNotNone(app.pending_restart)
+            self.assertIsNotNone(app.pending_restart_at)
             self.assertEqual(app.pending_restart[2], "updated htail")
 
 
