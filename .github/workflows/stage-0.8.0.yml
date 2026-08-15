@@ -1,0 +1,58 @@
+name: Stage htail 0.8.0
+
+on:
+  push:
+    branches:
+      - feature/multipane-0.8.0
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Unpack modular source
+        shell: bash
+        run: |
+          cat .staging/payload-* | base64 -d > /tmp/htail-080.tar.gz
+          tar xzf /tmp/htail-080.tar.gz
+          mkdir -p src/htail_app
+          cp htail src/htail_app/core.py
+          rm -rf .staging
+          rm -f .github/workflows/stage-0.8.0.yml
+
+      - name: Compile
+        run: python -m compileall -q src tools tests
+
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+      - name: Build and smoke-test release artifact
+        shell: bash
+        run: |
+          python tools/build_release.py --output /tmp/htail
+          test "$(python /tmp/htail --version)" = "htail 0.8.0"
+          python /tmp/htail --no-self-install-prompt | grep -F "Usage: ht FILE [FILE ...]"
+
+      - name: Commit staged source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Implement multi-file pane manager for htail 0.8.0"
+          git push origin HEAD:feature/multipane-0.8.0
