@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 
+from htail_app import VERSION
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,9 +18,9 @@ class BundleTests(unittest.TestCase):
             out = Path(tmp) / "htail"
             subprocess.run([sys.executable, str(ROOT / "tools" / "build_release.py"), "--output", str(out)], check=True)
             result = subprocess.run([sys.executable, str(out), "--version"], check=True, capture_output=True, text=True)
-            self.assertEqual(result.stdout.strip(), "htail 0.8.5")
+            self.assertEqual(result.stdout.strip(), f"htail {VERSION}")
             text = out.read_text(encoding="utf-8")
-            self.assertIn('HTAIL_VERSION = "0.8.5"', text)
+            self.assertIn(f'HTAIL_VERSION = "{VERSION}"', text)
 
 
 if __name__ == "__main__":

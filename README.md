@@ -37,6 +37,18 @@ ht --layout grid *.log
 ht --layout stream reviewer.md implementer.md
 ```
 
+Watch a pipe or run a command directly:
+
+```bash
+pytest -q | ht
+cat build.log | ht -
+ht --exec "pytest -vv"
+ht server.log --exec "python worker.py"
+ht --pid 12345 server.log
+```
+
+When stdin is a pipe, htail reads keyboard/mouse controls from the controlling terminal, so the full-screen UI remains interactive. `--exec` is repeatable and merges the child command's stderr into its stdout pane.
+
 Interactive htail reads the **full current file** and initially positions each pane at EOF: if the file fits, the whole file is visible; otherwise the pane shows the final screenful after wrapping. `-n` is retained only for non-interactive tail-like output.
 
 ### Multi-file layouts
@@ -84,6 +96,8 @@ A new update moves **only its own pane** to the beginning of that update. Other 
 - Per-pane pause, scrolling, update navigation, idle state, and unseen-update counts.
 - Display-only `--grep` / `--exclude` filters; hidden lines remain in change tracking.
 - Robust following across append, truncation, rewrite, atomic replacement, staged writes, and same-size rewrites.
+- Fast append-only path: ordinary growing logs are consumed from the previous byte offset instead of rereading the complete file on every append.
+- Incremental Markdown render/wrap caches reuse unchanged visual work across small updates.
 
 ## Updates
 
@@ -121,3 +135,14 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 python tools/build_release.py --output /tmp/htail
 python /tmp/htail --version
 ```
+
+## Benchmarks
+
+A synthetic benchmark harness is available for before/after-style comparisons on the same machine:
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_htail.py
+PYTHONPATH=src python benchmarks/benchmark_htail.py --sizes 1 10 50 100 --iterations 3
+```
+
+Absolute timings depend on storage and VM hardware; the ratios are the useful metric. See `docs/NEXT.md` for deliberately deferred ideas.

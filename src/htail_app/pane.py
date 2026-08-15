@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import time
 from typing import List, Optional, Sequence, Tuple
 
@@ -33,8 +35,10 @@ class Pane:
         display_filter: core.DisplayFilter,
         color: bool,
         idle_warn: float,
+        display_name: Optional[str] = None,
     ) -> None:
         self.path = path
+        self.display_name = display_name
         self.highlighter = highlighter
         self.display_filter = display_filter
         self.color = color
@@ -72,9 +76,48 @@ class Pane:
         self._snapshot_top = 0
         self._snapshot_anchor_pending = False
 
+        self._wrap_cache: "OrderedDict[Tuple[int, str], Tuple[str, ...]]" = OrderedDict()
+        self._render_cache: "OrderedDict[str, str]" = OrderedDict()
+        self._cache_limit = 12000
+
     @property
     def name(self) -> str:
-        return self.path.name or str(self.path)
+        return self.display_name or self.path.name or str(self.path)
+
+    def _cache_put(self, cache, key, value) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._cache_limit:
+            cache.popitem(last=False)
+
+    def _wrap_cached(self, text: str, width: int) -> List[str]:
+        key = (max(1, width), text)
+        cached = self._wrap_cache.get(key)
+        if cached is not None:
+            self._wrap_cache.move_to_end(key)
+            return list(cached)
+        wrapped = tuple(core.wrap_ansi(text, max(1, width)) or [""])
+        self._cache_put(self._wrap_cache, key, wrapped)
+        return list(wrapped)
+
+    def _render_snapshot_lines(self, raw_visible: Sequence[str]) -> List[str]:
+        if not self.highlighter.enabled:
+            return [line.rstrip("\r\n") for line in raw_visible]
+        if self.highlighter.mode == "markdown-rendered":
+            fence_re = re.compile(r"^\s*(?:```|~~~)")
+            if not any(fence_re.match(line.rstrip("\r\n")) for line in raw_visible):
+                rendered: List[str] = []
+                for raw in raw_visible:
+                    body = raw.rstrip("\r\n")
+                    cached = self._render_cache.get(body)
+                    if cached is None:
+                        cached = self.highlighter._render_markdown_line(body)
+                        self._cache_put(self._render_cache, body, cached)
+                    else:
+                        self._render_cache.move_to_end(body)
+                    rendered.append(cached)
+                return rendered
+        return self.highlighter.render_lines(raw_visible)
 
     def set_message(self, text: str, duration: float = 2.5) -> None:
         self.message = text
@@ -104,7 +147,7 @@ class Pane:
 
         for logical_index, line in enumerate(self.lines):
             self._logical_to_visual.append(len(self._visual_lines))
-            wrapped = core.wrap_ansi(line, width) or [""]
+            wrapped = self._wrap_cached(line, width)
             self._visual_lines.extend(wrapped)
             self._visual_to_logical.extend([logical_index] * len(wrapped))
 
@@ -161,10 +204,7 @@ class Pane:
             if self.display_filter.accepts(line)
         ]
         raw_visible = [line for _, line in indexed]
-        if self.highlighter.enabled:
-            styled = self.highlighter.render_lines(raw_visible)
-        else:
-            styled = [line.rstrip("\r\n") for line in raw_visible]
+        styled = self._render_snapshot_lines(raw_visible)
 
         visual: List[str] = []
         anchor: Optional[int] = None
@@ -173,15 +213,15 @@ class Pane:
             changed = source_index in self.snapshot_changed
             if changed and self.snapshot_update_header and not header_inserted:
                 anchor = len(visual)
-                visual.extend(core.wrap_ansi(self.snapshot_update_header, width) or [""])
+                visual.extend(self._wrap_cached(self.snapshot_update_header, width))
                 header_inserted = True
             if changed:
                 row = core.paint("▌ ", core.BOLD_LIGHT_CYAN, self.color) + row
-            visual.extend(core.wrap_ansi(row, width) or [""])
+            visual.extend(self._wrap_cached(row, width))
 
         if self.snapshot_update_header and not header_inserted:
             anchor = len(visual)
-            visual.extend(core.wrap_ansi(self.snapshot_update_header, width) or [""])
+            visual.extend(self._wrap_cached(self.snapshot_update_header, width))
 
         self._snapshot_visual_lines = visual
         if self._snapshot_anchor_pending:
