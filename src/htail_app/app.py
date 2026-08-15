@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
+import urllib.error
+import urllib.request
 
 from . import VERSION
 from . import core
@@ -163,40 +168,110 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(0, width - visible)
 
 
-def _panel_lines(title: str, content: Sequence[str], width: int, height: int, color: bool) -> List[str]:
+def _slice_ansi(text: str, start: int, width: int) -> str:
+    plain = core.strip_ansi(text)
+    if width <= 0 or start >= len(plain):
+        return ""
+    if start <= 0:
+        clipped = core.clip_ansi(text, width)
+        return clipped
+    remainder = text
+    visible = 0
+    i = 0
+    while i < len(remainder) and visible < start:
+        match = core.ANSI_RE.match(remainder, i)
+        if match:
+            i = match.end()
+            continue
+        visible += 1
+        i += 1
+    return core.clip_ansi(remainder[i:], width)
+
+
+def _dim_line(text: str, color: bool) -> str:
+    if not color or not text.strip():
+        return text
+    return core.DIM + text + core.RESET
+
+
+def _panel_geometry(title: str, content: Sequence[str], width: int, height: int, color: bool) -> Tuple[int, int, int, int, List[str]]:
     if width < 34 or height < 5:
         rows: List[str] = []
         for line in content:
             rows.extend(core.wrap_ansi(line, width) if line else [""])
-        return [_pad(line, width) for line in rows[:height]] + [" " * width] * max(0, height - len(rows))
+        if not color:
+            rows = [core.strip_ansi(row) for row in rows]
+        rows = [_pad(line, width) for line in rows[:height]] + [" " * width] * max(0, height - len(rows))
+        return 0, 0, width, min(height, len(rows)), rows[:height]
+
     panel_width = min(90, max(34, width - 6))
     inner_width = panel_width - 4
     rendered: List[str] = []
     for line in content:
         rendered.extend(core.wrap_ansi(line, inner_width) if line else [""])
-    limit = max(1, height - 2)
+    if not color:
+        rendered = [core.strip_ansi(row) for row in rendered]
+    limit = max(1, height - 4)
     if len(rendered) > limit:
         rendered = rendered[: max(0, limit - 1)] + [core.paint("… more omitted", core.DIM, color)]
+
     label = f" {title} "
-    dash = max(0, panel_width - 2 - len(label))
-    border_style = core.BOLD_LIGHT_CYAN
-    top = "╭" + "─" * (dash // 2) + label + "─" * (dash - dash // 2) + "╮"
-    bottom = "╰" + "─" * (panel_width - 2) + "╯"
-    if color:
-        top = core.paint(top, border_style, True)
-        bottom = core.paint(bottom, border_style, True)
-        side = core.paint("│", core.CYAN, True)
-    else:
-        side = "│"
-    panel = [_pad(top, panel_width)]
+    label_visible = len(label)
+    fill = max(0, panel_width - 2 - label_visible)
+    left_fill = max(1, fill // 2)
+    right_fill = max(1, fill - left_fill)
+    if left_fill + right_fill + label_visible > panel_width - 2:
+        right_fill = max(1, panel_width - 2 - label_visible - left_fill)
+    top_plain = "╭" + "─" * left_fill + label + "─" * right_fill + "╮"
+    top_plain = top_plain[:panel_width-1] + "╮" if len(top_plain) > panel_width else top_plain.ljust(panel_width - 1, "─") + "╮"
+    bottom_plain = "╰" + "─" * (panel_width - 2) + "╯"
+    if len(bottom_plain) > panel_width:
+        bottom_plain = bottom_plain[:panel_width-1] + "╯"
+    side_plain = "│"
+    top = core.paint(top_plain, core.BOLD_LIGHT_CYAN, color)
+    bottom = core.paint(bottom_plain, core.BOLD_LIGHT_CYAN, color)
+    side = core.paint(side_plain, core.CYAN, color)
+    rows = [_pad(top, panel_width)]
     for line in rendered:
-        panel.append(_pad(side + " " + _pad(line, inner_width) + " " + side, panel_width))
-    panel.append(_pad(bottom, panel_width))
-    indent = " " * max(0, (width - panel_width) // 2)
-    rows = [indent + row + " " * max(0, width - len(core.strip_ansi(indent + row))) for row in panel]
-    top_pad = max(0, (height - len(rows)) // 2)
-    out = [" " * width] * top_pad + rows
-    return out[:height] + [" " * width] * max(0, height - len(out))
+        rows.append(_pad(side + " " + _pad(line, inner_width) + " " + side, panel_width))
+    rows.append(_pad(bottom, panel_width))
+    left = max(0, (width - panel_width) // 2)
+    top_y = max(0, (height - len(rows)) // 2)
+    return left, top_y, panel_width, len(rows), rows
+
+
+def _panel_lines(title: str, content: Sequence[str], width: int, height: int, color: bool) -> List[str]:
+    left, top_y, panel_width, panel_height, panel_rows = _panel_geometry(title, content, width, height, color)
+    out = [" " * width for _ in range(height)]
+    for i, row in enumerate(panel_rows[:height]):
+        y = top_y + i
+        if 0 <= y < height:
+            out[y] = (" " * left) + row + (" " * max(0, width - left - len(core.strip_ansi(row))))
+    if not color:
+        out = [core.strip_ansi(row) for row in out]
+    return out
+
+
+def _overlay_modal(background: Sequence[str], panel: Sequence[str], width: int, height: int, color: bool) -> List[str]:
+    out: List[str] = []
+    for y in range(height):
+        bg = background[y] if y < len(background) else (" " * width)
+        fg = panel[y] if y < len(panel) else (" " * width)
+        if not core.strip_ansi(fg).strip():
+            out.append(_dim_line(bg, color))
+            continue
+        plain_fg = core.strip_ansi(fg)
+        non_space = [i for i, ch in enumerate(plain_fg) if ch != ' ']
+        if not non_space:
+            out.append(_dim_line(bg, color))
+            continue
+        start = non_space[0]
+        end = non_space[-1] + 1
+        left = _slice_ansi(bg, 0, start)
+        mid = _slice_ansi(fg, start, end - start)
+        right = _slice_ansi(bg, end, max(0, width - end))
+        out.append(_dim_line(left, color) + mid + _dim_line(right, color))
+    return out
 
 
 class MultiApp:
@@ -216,7 +291,11 @@ class MultiApp:
         self.help_active = False
         self.update_confirm_active = False
         self.update_installing = False
+        self.update_install_status = ""
+        self.update_install_progress: Optional[Tuple[int, Optional[int]]] = None
+        self.update_install_result: Optional[Tuple[bool, str]] = None
         self.update_release: Optional[core.ReleaseInfo] = None
+        self.pending_restart: Optional[Tuple[Path, List[str], str]] = None
         self.update_check_done = False
         self.update_check_error: Optional[str] = None
         self.update_manual_check_pending = False
@@ -378,13 +457,28 @@ class MultiApp:
         if release is None:
             return _panel_lines("Update", ["No update is currently available.", "", "Press U to check GitHub again."], width, height, self.color)
         if self.update_installing:
-            return _panel_lines(
-                "Installing update",
-                [core.paint(f"htail {VERSION}  →  {release.version}", core.BOLD, self.color), "", "Downloading release…", "Verifying SHA-256 checksum…", "Replacing the executable atomically…", "", "All watched files will reopen automatically."],
-                width,
-                height,
-                self.color,
-            )
+            content: List[str] = [
+                core.paint(f"htail {VERSION}  →  {release.version}", core.BOLD, self.color),
+                core.paint(self.update_service.repo, core.DIM, self.color),
+                "",
+                self.update_install_status or "Preparing update…",
+            ]
+            if self.update_install_progress is not None:
+                current, total = self.update_install_progress
+                if total and total > 0:
+                    frac = max(0.0, min(1.0, current / total))
+                    bar_w = max(12, min(40, width - 24))
+                    filled = int(round(bar_w * frac))
+                    bar = "[" + ("█" * filled) + ("░" * max(0, bar_w - filled)) + "]"
+                    content.append(core.paint(bar, core.BOLD_LIGHT_CYAN, self.color) + f"  {frac*100:5.1f}%")
+                    content.append(f"{current:,} / {total:,} bytes")
+                else:
+                    step = (int(time.monotonic() * 8) % 12)
+                    spinner = ''.join('█' if i == step else '░' for i in range(12))
+                    content.append(core.paint(f"[{spinner}]", core.BOLD_LIGHT_CYAN, self.color) + "  downloading…")
+                    content.append(f"{current:,} bytes")
+            content.extend(["", "All watched files will reopen automatically when the update completes."])
+            return _panel_lines("Installing update", content, width, height, self.color)
         features, fixes, other = core.release_note_sections(release.notes)
         content: List[str] = [
             core.paint(f"htail {VERSION}  →  {release.version}", core.BOLD, self.color),
@@ -426,7 +520,9 @@ class MultiApp:
                 parts.append("MAX")
         if lead:
             parts.append(lead)
-        if self.update_release is not None:
+        if self.update_installing:
+            parts.append("UPDATING")
+        elif self.update_release is not None:
             parts.append(f"UPDATE {self.update_release.version}")
         top = " · ".join(parts)
         controls = "Tab pane · click focus · l layout · z max · ↑↓/Pg scroll · [/] update · f newest · p pause · u check · q quit · ? help"
@@ -436,14 +532,15 @@ class MultiApp:
         if not self.dirty:
             return
         width, body_height, footer_height = self.content_dimensions()
+        base_body = self._pane_boxes(width, body_height)
         if self.update_confirm_active:
-            body = self._update_lines(width, body_height)
+            body = _overlay_modal(base_body, self._update_lines(width, body_height), width, body_height, self.color)
         elif self.layout_menu:
-            body = self._layout_menu_lines(width, body_height)
+            body = _overlay_modal(base_body, self._layout_menu_lines(width, body_height), width, body_height, self.color)
         elif self.help_active:
-            body = self._help_lines(width, body_height)
+            body = _overlay_modal(base_body, self._help_lines(width, body_height), width, body_height, self.color)
         else:
-            body = self._pane_boxes(width, body_height)
+            body = base_body
 
         sys.stdout.write(core.CURSOR_HOME)
         for row in range(body_height):
@@ -453,11 +550,11 @@ class MultiApp:
                 sys.stdout.write("\n")
 
         if self.update_confirm_active:
-            status = ["UPDATE · y confirm · n cancel", "File watching continues while this panel is open"]
+            status = ["UPDATE · y confirm · n cancel", "Background watching continues while this dialog is open"]
         elif self.layout_menu:
-            status = ["LAYOUT · a/r/c/g/s choose · l/Esc cancel", "File watching continues while choosing a layout"]
+            status = ["LAYOUT · a/r/c/g/s choose · l/Esc cancel", "Background watching continues while this dialog is open"]
         elif self.help_active:
-            status = ["HELP · ? close · q quit", "File watching continues while help is open"]
+            status = ["HELP · ? close · q quit", "Background watching continues while this dialog is open"]
         else:
             status = self._status_lines(width, body_height)
 
@@ -517,16 +614,13 @@ class MultiApp:
             if key in ("n", "N", "ESC", "q", "Q"):
                 self.update_confirm_active = False
                 self.set_message("update cancelled")
-            elif key in ("y", "Y") and self.update_release is not None:
+            elif key in ("y", "Y") and self.update_release is not None and not self.update_installing:
                 self.update_installing = True
+                self.update_install_result = None
+                self.update_install_status = "Preparing update…"
+                self.update_install_progress = None
                 self.dirty = True
-                self.render()
-                ok, message = self.update_service.install(self.update_release, executable_path())
-                self.update_installing = False
-                if ok:
-                    raise core.RestartRequested(executable_path(), sys.argv[1:], message)
-                self.update_confirm_active = False
-                self.set_message(message, 6.0)
+                threading.Thread(target=self._install_worker, args=(self.update_release,), daemon=True, name="htail-install").start()
             return False
 
         if key in ("q", "Q"):
@@ -634,6 +728,15 @@ class MultiApp:
 
     def tick(self, now: float) -> None:
         self._tick_updates(now)
+        if self.update_install_result is not None and not self.update_installing:
+            ok, message = self.update_install_result
+            self.update_install_result = None
+            if ok:
+                # restart handled by run_interactive after this tick
+                self.set_message(message, 4.0)
+            else:
+                self.update_confirm_active = False
+                self.set_message(message, 6.0)
         second = int(now)
         if second != self.last_status_second:
             self.last_status_second = second
@@ -695,6 +798,9 @@ def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.
                 now = time.monotonic()
                 app.process_watchers(now)
                 app.tick(now)
+                if app.pending_restart is not None:
+                    target, argv, message = app.pending_restart
+                    raise core.RestartRequested(target, argv, message)
                 app.render()
                 time.sleep(args.interval)
     except core.RestartRequested as exc:
