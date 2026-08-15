@@ -21,6 +21,9 @@ jobs:
         shell: bash
         run: |
           test -f update-0.7.2.patch
+          sed -i 's/# Set this to "owner\/repository" once the public release repository exists\./# Public GitHub repository used for background release checks and self-update./' htail
+          sed -i 's/# Until then HTAIL_UPDATE_REPO can be used to exercise the updater without/# HTAIL_UPDATE_REPO can override this for development\/testing./' htail
+          sed -i '/^# changing the script\.$/d' htail
           patch --dry-run -p1 < update-0.7.2.patch
           patch -p1 < update-0.7.2.patch
           rm -f update-0.7.2.patch .github/workflows/apply-update.yml
