@@ -1,13 +1,16 @@
 import io
+import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
 from types import SimpleNamespace
 
 from htail_app import core
+from htail_app.app import _process_alive, parse_args
 from htail_app.pane import Pane
-from htail_app.sources import StreamFollower
+from htail_app.sources import CommandFollower, StreamFollower
 from htail_app.watcher import FileFollower, analyze_changes
 
 
@@ -84,6 +87,33 @@ class StreamSourceTests(unittest.TestCase):
         self.assertEqual(update.added, 2)
         self.assertIsNotNone(ended)
         self.assertTrue(follower.finished)
+
+    def test_command_source_merges_output_and_reaches_finished_state(self):
+        command = f'"{sys.executable}" -c "import sys; print(123); print(456, file=sys.stderr)"'
+        follower = CommandFollower(command, args(), label='test-command')
+        follower.initialize_if_available()
+        collected = []
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not follower.finished:
+            result = follower.poll()
+            if result is not None and hasattr(result, 'events'):
+                for kind, lines in result.events:
+                    if kind == 'add':
+                        collected.extend(lines)
+            time.sleep(0.01)
+        follower.close()
+        joined = ''.join(collected)
+        self.assertIn('123', joined)
+        self.assertIn('456', joined)
+        self.assertTrue(follower.finished)
+
+    def test_parser_accepts_repeatable_exec_and_pid(self):
+        parsed = parse_args(['--exec', 'echo one', '--exec', 'echo two', '--pid', '123', 'x.log'])
+        self.assertEqual(parsed.commands, ['echo one', 'echo two'])
+        self.assertEqual(parsed.pid, 123)
+
+    def test_current_process_is_reported_alive(self):
+        self.assertTrue(_process_alive(os.getpid()))
 
 
 class RenderCacheTests(unittest.TestCase):
