@@ -1,0 +1,60 @@
+name: Finalize htail 0.10.0
+
+on:
+  push:
+    branches:
+      - feature/search-glob-perf-0.10.0
+    paths:
+      - .github/finalize_010.py
+      - .github/workflows/finalize-010.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/search-glob-perf-0.10.0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Apply final refinements
+        run: python .github/finalize_010.py
+      - name: Compile
+        run: python -m compileall -q src tools tests benchmarks
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Compare visible behavior with v0.9.0
+        env:
+          PYTHONPATH: src
+        run: python benchmarks/reference_compare.py --reference v0.9.0
+      - name: Run append/diff benchmark
+        env:
+          PYTHONPATH: src
+        run: python benchmarks/benchmark_htail.py --sizes 1 10 50 --iterations 3
+      - name: Build standalone executable
+        run: python tools/build_release.py --output /tmp/htail
+      - name: Smoke test bundle
+        env:
+          PYTHONPATH: src
+        run: |
+          actual="$(python /tmp/htail --version)"
+          expected="$(python -c 'from htail_app import VERSION; print(f"htail {VERSION}")')"
+          test "$actual" = "$expected"
+      - name: Commit validated refinements
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests benchmarks README.md RELEASE_NOTES.md docs
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Finalize glob parity and terminal reference checks for htail 0.10.0"
+          git push origin HEAD:feature/search-glob-perf-0.10.0
