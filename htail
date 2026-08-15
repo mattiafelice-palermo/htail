@@ -97,7 +97,7 @@ ALT_SCREEN_OFF = "\033[?1049l"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-HTAIL_VERSION = "0.7.2"
+HTAIL_VERSION = "0.7.3"
 ACTIVE_VERIFY_WINDOW = 15.0
 AUTO_UPDATE_CHECK_INTERVAL = 3600.0
 # Public GitHub repository used for background release checks and self-update.
@@ -965,6 +965,48 @@ class ReleaseInfo:
     asset_url: str
     asset_name: str
     checksum_url: Optional[str] = None
+    notes: str = ""
+
+
+def _clean_release_note_line(text: str) -> str:
+    """Reduce simple Markdown in release notes to compact terminal text."""
+    text = text.strip()
+    text = re.sub(r"^[-*+]\s+", "", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: m.group(1) or m.group(2), text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    return text.strip()
+
+
+def release_note_sections(notes: str) -> Tuple[List[str], List[str], List[str]]:
+    """Return categorized (features, bug fixes, other) GitHub release notes."""
+    features: List[str] = []
+    fixes: List[str] = []
+    other: List[str] = []
+    section: Optional[str] = None
+    for raw in notes.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        heading = re.match(r"^#{1,6}\s+(.+)$", line)
+        if heading:
+            name = heading.group(1).strip().lower()
+            if "feature" in name or "enhancement" in name or name == "new":
+                section = "features"
+            elif "bug" in name or name in {"fixes", "fix"}:
+                section = "fixes"
+            else:
+                section = None
+            continue
+        if re.match(r"^[-*+]\s+", line):
+            item = _clean_release_note_line(line)
+            if section == "features":
+                features.append(item)
+            elif section == "fixes":
+                fixes.append(item)
+            else:
+                other.append(item)
+    return features, fixes, other
 
 
 def _version_key(value: str) -> Tuple[int, ...]:
@@ -1064,6 +1106,7 @@ class UpdateService:
 
         tag = str(payload.get("tag_name") or "").strip()
         version = tag.lstrip("vV")
+        notes = str(payload.get("body") or "")
         if not tag or not is_newer_version(version, HTAIL_VERSION):
             return None
 
@@ -1093,6 +1136,7 @@ class UpdateService:
             asset_url=asset_url,
             asset_name=self.asset_name,
             checksum_url=checksum_url,
+            notes=notes,
         )
 
     def install(self, release: ReleaseInfo, target: Path) -> Tuple[bool, str]:
@@ -1623,6 +1667,12 @@ class TerminalUI:
         size = shutil.get_terminal_size((100, 30))
         return max(20, size.columns), max(4, size.lines)
 
+    def content_width(self) -> int:
+        # Keep the terminal's final physical column unused. Filling it can set
+        # an implicit-wrap flag, causing the next newline to consume an extra
+        # row and letting the fixed footer overwrite body content.
+        return max(1, self.dimensions()[0] - 1)
+
     def body_height(self) -> int:
         width, height = self.dimensions()
         return max(1, height - self.footer_height(width))
@@ -1658,7 +1708,7 @@ class TerminalUI:
 
     def _logical_start_to_visual(self, logical_index: int, width: Optional[int] = None) -> int:
         if width is None:
-            width = self.dimensions()[0]
+            width = self.content_width()
         self._ensure_layout(width)
         if logical_index < 0 or logical_index >= len(self._logical_to_visual):
             return 0
@@ -1666,7 +1716,7 @@ class TerminalUI:
 
     def _current_logical_index(self, width: Optional[int] = None) -> int:
         if width is None:
-            width = self.dimensions()[0]
+            width = self.content_width()
         self._ensure_layout(width)
         if not self._visual_to_logical:
             return 0
@@ -1674,7 +1724,7 @@ class TerminalUI:
         return self._visual_to_logical[index]
 
     def max_scroll_top(self) -> int:
-        width = self.dimensions()[0]
+        width = self.content_width()
         self._ensure_layout(width)
         # Allow a header near the end of the buffer to sit at the TOP of the
         # viewport, leaving blank rows below it. This is central to htail's
@@ -1682,7 +1732,7 @@ class TerminalUI:
         return max(0, len(self._visual_lines) - 1)
 
     def bottom_top(self) -> int:
-        width = self.dimensions()[0]
+        width = self.content_width()
         self._ensure_layout(width)
         return max(0, len(self._visual_lines) - self.body_height())
 
@@ -1992,7 +2042,7 @@ class TerminalUI:
         return current
 
     def _position_summary(self, body_height: int) -> Tuple[int, int]:
-        width = self.dimensions()[0]
+        width = self.content_width()
         self._ensure_layout(width)
         below = max(0, len(self._visual_lines) - (self.top + body_height))
         above = self.top
@@ -2055,7 +2105,12 @@ class TerminalUI:
             top_parts.append(f"UPDATE {self.update_release.version}")
         top_parts.append(idle_text)
 
-        update_control = " · u update" if self.update_release is not None else ""
+        if self.update_release is not None:
+            update_control = " · u update"
+        elif self.update_service is not None and self.update_service.enabled:
+            update_control = " · u check"
+        else:
+            update_control = ""
         if width >= 108:
             controls = "↑↓/Pg scroll · [/] update · f newest · p pause · c clear" + update_control + " · q quit · ? help"
         else:
@@ -2078,7 +2133,7 @@ class TerminalUI:
             "  p           pause/resume automatic viewport jumps",
             "              (updates are still captured while paused)",
             "  c           clear displayed history; tracking continues",
-            "  u           confirm/install an available release update",
+            "  u           check for updates / install an available release",
             "  ?           close this help",
             "  q           quit htail",
             "",
@@ -2094,40 +2149,86 @@ class TerminalUI:
         ]
         return [clip_ansi(line, width) for line in rows[:body_height]]
 
+    def _panel_lines(
+        self, title: str, content: Sequence[str], width: int, body_height: int
+    ) -> List[str]:
+        """Render a centered bordered panel inside the terminal viewport."""
+        if width < 34:
+            return [clip_ansi(line, width) for line in content[:body_height]]
+        panel_width = min(88, max(34, width - 6))
+        inner_width = panel_width - 4
+        rendered: List[str] = []
+        for line in content:
+            rendered.extend(wrap_ansi(line, inner_width) if line else [""])
+        limit = max(1, body_height - 2)
+        if len(rendered) > limit:
+            rendered = rendered[: limit - 1] + [paint("… more release notes omitted", DIM, self.color)]
+        label = f" {title} "
+        dashes = max(0, panel_width - 2 - len(label))
+        top = "╭" + "─" * (dashes // 2) + label + "─" * (dashes - dashes // 2) + "╮"
+        bottom = "╰" + "─" * (panel_width - 2) + "╯"
+        if self.color:
+            top = paint(top, BOLD_LIGHT_CYAN, True)
+            bottom = paint(bottom, BOLD_LIGHT_CYAN, True)
+        panel = [top]
+        for line in rendered:
+            padded = line + " " * max(0, inner_width - len(strip_ansi(line)))
+            panel.append(f"{paint('│', CYAN, self.color)} {padded} {paint('│', CYAN, self.color)}")
+        panel.append(bottom)
+        indent = " " * max(0, (width - panel_width) // 2)
+        panel = [indent + line for line in panel]
+        return ([""] * max(0, (body_height - len(panel)) // 2) + panel)[:body_height]
+
     def _update_modal_lines(self, width: int, body_height: int) -> List[str]:
         release = self.update_release
         if release is None:
-            return ["No update is currently available."]
-
+            return self._panel_lines("Update", ["No update is currently available.", "", "Press u to check GitHub again."], width, body_height)
         if self.update_installing:
-            rows = [
-                "Installing update…",
-                "",
-                f"htail {HTAIL_VERSION} → {release.version}",
-                "",
-                "Downloading and validating the release. Please wait.",
-            ]
-        else:
-            rows = [
-                "Update available",
-                "",
-                f"htail {HTAIL_VERSION} → {release.version}",
-                f"Repository: {self.update_service.repo if self.update_service else ''}",
-                "",
-                "The current executable will be replaced atomically.",
-                "A .bak copy of the previous version will be kept.",
-                f"After updating, htail will reopen: {self.path}",
-                "",
-                "Update now?   y = yes   n = cancel",
-            ]
-        return [clip_ansi(line, width) for line in rows[:body_height]]
+            return self._panel_lines(
+                "Installing update",
+                [
+                    paint(f"htail {HTAIL_VERSION}  →  {release.version}", BOLD, self.color),
+                    "", "Downloading release…", "Verifying SHA-256 checksum…",
+                    "Replacing the executable atomically…", "",
+                    "The current file will reopen automatically.",
+                ],
+                width, body_height,
+            )
+        features, fixes, other = release_note_sections(release.notes)
+        content: List[str] = [
+            paint(f"htail {HTAIL_VERSION}  →  {release.version}", BOLD, self.color),
+            paint(self.update_service.repo if self.update_service else "", DIM, self.color),
+            "",
+        ]
+        if features:
+            content.append(paint("New features", BOLD_LIGHT_CYAN, self.color))
+            content.extend(f"• {item}" for item in features[:4])
+            content.append("")
+        if fixes:
+            content.append(paint("Bug fixes", BOLD_YELLOW, self.color))
+            content.extend(f"• {item}" for item in fixes[:4])
+            content.append("")
+        if not features and not fixes:
+            content.append(paint("Release notes", BOLD_LIGHT_CYAN, self.color))
+            content.extend(f"• {item}" for item in other[:5])
+            if not other:
+                content.append("No categorized release notes were provided.")
+            content.append("")
+        content.extend([
+            "A .bak copy of the current executable will be kept.",
+            f"After updating, htail will reopen {self.path.name}.",
+            "",
+            paint("[Y] Update now", BOLD + GREEN, self.color) + "    " + paint("[N] Cancel", BOLD, self.color),
+        ])
+        return self._panel_lines("Update available", content, width, body_height)
 
     def render(self) -> None:
         if not self.active:
             return
 
-        width, height = self.dimensions()
-        footer_height = self.footer_height(width)
+        terminal_width, height = self.dimensions()
+        width = max(1, terminal_width - 1)
+        footer_height = self.footer_height(terminal_width)
         body_height = max(1, height - footer_height)
         self._ensure_layout(width)
         self.top = min(max(0, self.top), self.max_scroll_top())
