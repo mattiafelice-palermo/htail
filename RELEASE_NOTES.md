@@ -1,20 +1,20 @@
-# htail 0.9.0
+# htail 0.10.0
 
 ## New features
 
-- Read standard input as a first-class source: `producer | ht` works in the interactive TUI, with controls read from the controlling terminal. `-` can also be used explicitly alongside file sources.
-- Added repeatable `--exec COMMAND` sources with merged stdout/stderr panes.
-- Added `--pid PID` to exit when a producer or companion process terminates.
-- Added `benchmarks/benchmark_htail.py` and `docs/NEXT.md` for reproducible performance checks and the deferred feature/performance backlog.
+- Added interactive regex search with `/`, plus `n` / `N` for next/previous match navigation in the focused pane.
+- Added persistent regex highlighting with `h`; press `H` to clear the focused pane's highlight rule.
+- Added dynamic glob sources. Quote positional patterns such as `ht 'logs/*.log'` or use repeatable `--glob PATTERN`; new matching files are added without restarting htail.
+- Pressing `u` now performs a manual update check and opens the update modal automatically as soon as a newer release is found; a second `u` is no longer required.
+- Added a permanent v0.9.0 differential reference harness so behavior and performance can be compared on the same machine before accepting future optimizations.
 
 ## Performance
 
-- Pure same-file appends now use a byte-offset fast path instead of rereading and rediffing the complete file.
-- Full rewrites now compute diff events and changed-current-row indexes in one structural pass rather than two.
-- Panes cache safe Markdown rendering and ANSI-aware wrapping for unchanged lines across incremental updates.
-- Active post-update content verification is rate-limited while retaining the periodic verified-snapshot fallback for unusual same-metadata rewrites.
+- Added terminal damage rendering: htail keeps the previous rendered frame and rewrites only physical terminal rows whose final content changed.
+- Added native filesystem wakeups on Linux (inotify) and Windows directory-change notifications, with the existing polling/verified-snapshot path retained as a portable correctness fallback.
+- Native notifications are scheduling hints only: the existing debounce, append fast path, rewrite detection and periodic verified snapshot remain the authority for file semantics.
 
 ## Bug fixes / safety
 
-- Piped-stdin interactive sessions no longer lose keyboard controls because input is read from `/dev/tty` on POSIX.
-- In-app self-update is blocked during `--exec` sessions to avoid unexpectedly relaunching a child command; use `ht --update` separately in that case.
+- Manual update checks no longer stop at the transient “update available — press u” message; the confirmation modal opens immediately when the check completes.
+- Regex styling uses attribute-specific ANSI on/off codes so search/highlight overlays do not reset existing syntax-highlight foreground or bold styles.
