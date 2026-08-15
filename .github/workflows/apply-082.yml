@@ -24,7 +24,18 @@ jobs:
           python-version: "3.x"
 
       - name: Apply fixes
-        run: python tools/apply_082.py
+        shell: bash
+        run: |
+          python tools/apply_082.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/test_bundle.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'HTAIL_VERSION = "0.8.1"'
+          if old not in text:
+              raise SystemExit('expected stale embedded version assertion was not found')
+          path.write_text(text.replace(old, 'HTAIL_VERSION = "0.8.2"', 1), encoding='utf-8')
+          PY
 
       - name: Compile
         run: python -m compileall -q src tools tests
