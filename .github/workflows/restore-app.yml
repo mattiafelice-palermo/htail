@@ -1,0 +1,27 @@
+name: Restore app.py
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore app.py from v0.8.0
+        shell: bash
+        run: |
+          git show v0.8.0:src/htail_app/app.py > src/htail_app/app.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/htail_app/app.py
+          git commit -m "Restore app.py after failed publish attempt"
+          git push origin HEAD:main
