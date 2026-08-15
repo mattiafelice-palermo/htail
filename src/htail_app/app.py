@@ -19,6 +19,7 @@ from . import core
 from .input import InputReader, InputEvent, MouseEvent
 from .layout import LAYOUTS, Rect, pane_rects, resolve_auto
 from .pane import Pane, StreamPane
+from .sources import CommandFollower, StreamFollower
 from .watcher import FileFollower, WatchNotice, WatchUpdate
 
 # The reusable core is copied from the previous single-file implementation.
@@ -45,7 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Follow one or more text files in an interactive highlighted terminal viewer.",
     )
     parser.add_argument("--version", action="version", version=f"htail {VERSION}")
-    parser.add_argument("files", type=Path, nargs="*", help="text files to watch")
+    parser.add_argument("files", type=Path, nargs="*", help="text files to watch; use '-' for stdin")
+    parser.add_argument("--exec", dest="commands", action="append", default=[], metavar="COMMAND", help="run a shell command and watch its merged stdout/stderr; repeatable")
+    parser.add_argument("--pid", type=int, metavar="PID", help="exit after this process is no longer running")
     parser.add_argument("--install", nargs="?", const=core.DEFAULT_INSTALL_COMMAND, metavar="NAME")
     parser.add_argument("--no-self-install-prompt", action="store_true")
     parser.add_argument("--check-update", action="store_true")
@@ -93,7 +96,40 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("--debounce and --max-debounce must be >= 0")
     if args.idle_warn < 0:
         parser.error("--idle-warn must be >= 0")
+    if args.pid is not None and args.pid <= 0:
+        parser.error("--pid must be > 0")
+    if sum(1 for path in args.files if str(path) == "-") > 1:
+        parser.error("stdin ('-') can only be used once")
     return args
+
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+    try:
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(ok and code.value == STILL_ACTIVE)
+    except Exception:
+        return True
 
 
 def _install_executable(command_name: str) -> Tuple[bool, str, Path]:
@@ -291,7 +327,7 @@ class MultiApp:
         self.display_filter = display_filter
         self.update_service = update_service
         self.paths = list(args.files)
-        self.followers: List[FileFollower] = []
+        self.followers: List[object] = []
         self.panes: List[Pane] = []
         self.stream = StreamPane(color, args.idle_warn)
         self.layout = args.layout
@@ -320,20 +356,38 @@ class MultiApp:
         self.dirty = True
 
         for path in self.paths:
-            highlighter = core.SyntaxHighlighter(path, args.syntax, color)
-            pane = Pane(path, highlighter, display_filter, color, args.idle_warn)
-            follower = FileFollower(path, args)
+            if str(path) == "-":
+                pseudo = Path("stdin.txt")
+                highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
+                pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name="stdin")
+                follower = StreamFollower(sys.stdin, args, label="stdin")
+            else:
+                highlighter = core.SyntaxHighlighter(path, args.syntax, color)
+                pane = Pane(path, highlighter, display_filter, color, args.idle_warn)
+                follower = FileFollower(path, args)
             notice = follower.initialize_if_available()
             if notice and notice.initial_tail is not None:
                 pane.add_initial(notice.initial_tail)
                 pane.set_snapshot(follower.previous)
-                self._stream_initial(len(self.panes), pane, notice.initial_tail)
+                if notice.initial_tail:
+                    self._stream_initial(len(self.panes), pane, notice.initial_tail)
             else:
                 pane.waiting = True
                 if notice and notice.kind == "error":
                     pane.add_system_line(notice.text, warning=True)
             if highlighter.warning:
                 pane.add_system_line(highlighter.warning, warning=True)
+            self.panes.append(pane)
+            self.followers.append(follower)
+
+        for command_index, command in enumerate(args.commands, start=1):
+            pseudo = Path(f"command-{command_index}.log")
+            highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
+            label = f"$ {command}"
+            pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=label)
+            follower = CommandFollower(command, args, label=label)
+            follower.initialize_if_available()
+            pane.set_message(f"running pid {follower.process.pid}", 4.0)
             self.panes.append(pane)
             self.followers.append(follower)
 
@@ -510,7 +564,7 @@ class MultiApp:
             content.append("")
         content.extend([
             "A .bak copy of the current executable will be kept.",
-            f"After updating, htail will reopen all {len(self.paths)} watched file{'s' if len(self.paths) != 1 else ''}.",
+            f"After updating, htail will reopen all {len(self.panes)} source{'s' if len(self.panes) != 1 else ''}.",
             "",
             core.paint("[Y] Update now", core.BOLD + core.GREEN, self.color) + "    " + core.paint("[N] Cancel", core.BOLD, self.color),
         ])
@@ -630,6 +684,13 @@ class MultiApp:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        for follower in self.followers:
+            close = getattr(follower, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
         sys.stdout.write(core.SHOW_CURSOR + core.RESET + core.ALT_SCREEN_OFF)
         sys.stdout.flush()
 
@@ -677,6 +738,10 @@ class MultiApp:
                 self.update_confirm_active = False
                 self.set_message("update cancelled")
             elif key in ("y", "Y") and self.update_release is not None and not self.update_installing:
+                if self.args.commands:
+                    self.update_confirm_active = False
+                    self.set_message("update not installed during --exec; run 'ht --update' separately", 6.0)
+                    return False
                 self.update_installing = True
                 self.update_install_result = None
                 self.update_install_status = "Preparing update…"
@@ -825,6 +890,10 @@ class MultiApp:
                     pane.waiting = not follower.initialized
                     pane.missing = follower.initialized
                     pane.set_message("waiting for file", 4.0)
+                elif result.kind == "ended":
+                    pane.waiting = False
+                    pane.missing = False
+                    pane.set_message(result.text, 6.0)
                 elif result.kind == "error":
                     pane.add_system_line(result.text, warning=True)
                 self.dirty = True
@@ -903,6 +972,7 @@ def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.
     update_service.start()
     restart: Optional[core.RestartRequested] = None
     next_watch_poll = 0.0
+    next_pid_check = 0.0
     try:
         with app, InputReader(mouse=not args.no_mouse) as reader:
             while True:
@@ -919,6 +989,12 @@ def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.
                     break
 
                 now = time.monotonic()
+                if args.pid is not None and now >= next_pid_check:
+                    next_pid_check = now + 0.25
+                    if not _process_alive(args.pid):
+                        app.set_message(f"pid {args.pid} exited", 1.0)
+                        app.render()
+                        break
                 if now >= next_watch_poll:
                     app.process_watchers(now)
                     next_watch_poll = now + args.interval
@@ -960,33 +1036,60 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
     if args.lines is None:
         args.lines = 50
     panes: List[Pane] = []
-    followers: List[FileFollower] = []
-    for index, path in enumerate(args.files):
-        highlighter = core.SyntaxHighlighter(path, args.syntax, color)
-        pane = Pane(path, highlighter, display_filter, color, args.idle_warn)
-        follower = FileFollower(path, args)
+    followers: List[object] = []
+    for path in args.files:
+        if str(path) == "-":
+            pseudo = Path("stdin.txt")
+            highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
+            pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name="stdin")
+            follower = StreamFollower(sys.stdin, args, label="stdin")
+        else:
+            highlighter = core.SyntaxHighlighter(path, args.syntax, color)
+            pane = Pane(path, highlighter, display_filter, color, args.idle_warn)
+            follower = FileFollower(path, args)
         notice = follower.initialize_if_available()
         panes.append(pane); followers.append(follower)
         if notice and notice.initial_tail is not None:
             if not args.no_start_banner:
-                print(f"[htail {VERSION}] [{index + 1}] watching {path} · syntax: {highlighter.syntax_name}")
+                print(f"[htail {VERSION}] [{len(panes)}] watching {pane.name} · syntax: {highlighter.syntax_name}")
             visible = [line for line in notice.initial_tail if display_filter.accepts(line)]
             for line in core.render_initial_lines(visible, highlighter):
                 print(line)
         elif not args.no_start_banner:
-            print(f"[htail] [{index + 1}] waiting for {path}", file=sys.stderr)
+            print(f"[htail] [{len(panes)}] waiting for {pane.name}", file=sys.stderr)
+    for command_index, command in enumerate(args.commands, start=1):
+        pseudo = Path(f"command-{command_index}.log")
+        highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
+        pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=f"$ {command}")
+        follower = CommandFollower(command, args, label=pane.name)
+        follower.initialize_if_available()
+        panes.append(pane); followers.append(follower)
+        if not args.no_start_banner:
+            print(f"[htail {VERSION}] [{len(panes)}] running {command} (pid {follower.process.pid})")
     try:
         while True:
             time.sleep(args.interval)
             now = time.monotonic()
+            if args.pid is not None and not _process_alive(args.pid):
+                return 0
             for index, follower in enumerate(followers):
                 result = follower.poll(now)
                 if isinstance(result, WatchUpdate):
                     _render_stream_event(index, panes[index], result, args, display_filter, color)
                 elif isinstance(result, WatchNotice) and result.kind == "error":
                     print(f"[htail] [{index + 1}] {result.text}", file=sys.stderr)
+            if followers and all(bool(getattr(follower, "finished", False)) for follower in followers):
+                return 0
     except KeyboardInterrupt:
         return 0
+    finally:
+        for follower in followers:
+            close = getattr(follower, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1015,9 +1118,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[htail] {message}", file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
 
-    if not args.files:
+    if not args.files and not args.commands and not sys.stdin.isatty():
+        args.files = [Path("-")]
+
+    if not args.files and not args.commands:
         print(f"htail {VERSION}")
-        print("Usage: ht FILE [FILE ...]")
+        print("Usage: ht FILE [FILE ...] | producer | ht | ht --exec COMMAND")
         print("Example: ht reviewer.md implementer.md")
         return 0
 
@@ -1028,7 +1134,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     core.maybe_offer_pygments_install(args, color)
-    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    has_stdin_source = any(str(path) == "-" for path in args.files)
+    interactive = sys.stdout.isatty() and (sys.stdin.isatty() or has_stdin_source or bool(args.commands))
     if interactive:
         return run_interactive(args, color, display_filter, update_service)
     return run_noninteractive(args, color, display_filter)
