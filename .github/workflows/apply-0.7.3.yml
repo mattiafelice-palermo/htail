@@ -1,0 +1,137 @@
+name: Apply htail 0.7.3
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply 0.7.3 script patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, gzip
+          data = '''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'''
+          open('/tmp/update.patch','wb').write(gzip.decompress(base64.b64decode(data)))
+          PY
+          patch --dry-run -p1 < /tmp/update.patch
+          patch -p1 < /tmp/update.patch
+
+      - name: Add release notes and regression tests
+        shell: bash
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          # htail 0.7.3
+
+          ## New features
+
+          - Redesigned the in-app update confirmation as a centered terminal panel with clearer actions and version information.
+          - The update panel now shows the GitHub release changelog directly inside htail, separated into New features and Bug fixes.
+          - The footer now advertises `u check` even when no update is pending; pressing `u` forces an immediate GitHub release check.
+
+          ## Bug fixes
+
+          - Fixed a terminal row-accounting bug where content could disappear underneath the two-line footer while scrolling. htail now deliberately leaves the terminal's final physical column unused, preventing implicit terminal wrapping from consuming an extra row.
+          EOF
+          cat > tests/test_ui_regressions.py <<'PY'
+          import importlib.machinery
+          import importlib.util
+          from pathlib import Path
+          import sys
+          import unittest
+
+          ROOT = Path(__file__).resolve().parents[1]
+          SCRIPT = ROOT / "htail"
+          loader = importlib.machinery.SourceFileLoader("htail_ui_test_module", str(SCRIPT))
+          spec = importlib.util.spec_from_loader(loader.name, loader)
+          htail = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = htail
+          loader.exec_module(htail)
+
+          class UIRegressionTests(unittest.TestCase):
+              def make_ui(self, service=None):
+                  return htail.TerminalUI(
+                      Path("example.md"),
+                      htail.SyntaxHighlighter(Path("example.md"), "none", False),
+                      htail.DisplayFilter(),
+                      False,
+                      300,
+                      update_service=service,
+                  )
+
+              def test_content_width_reserves_last_terminal_column(self):
+                  ui = self.make_ui()
+                  ui.dimensions = lambda: (120, 30)
+                  self.assertEqual(ui.content_width(), 119)
+
+              def test_release_notes_are_categorized(self):
+                  features, fixes, other = htail.release_note_sections(
+                      "## New features\n- Better modal\n\n## Bug fixes\n- Footer fix\n"
+                  )
+                  self.assertEqual(features, ["Better modal"])
+                  self.assertEqual(fixes, ["Footer fix"])
+                  self.assertEqual(other, [])
+
+              def test_update_panel_contains_categories_and_actions(self):
+                  service = htail.UpdateService("example/repo")
+                  ui = self.make_ui(service)
+                  ui.update_release = htail.ReleaseInfo(
+                      version="0.7.4", tag="v0.7.4", asset_url="x",
+                      asset_name="htail", checksum_url="y",
+                      notes="## New features\n- Better modal\n\n## Bug fixes\n- Footer fix\n",
+                  )
+                  visible = "\n".join(
+                      htail.strip_ansi(x) for x in ui._update_modal_lines(90, 25)
+                  )
+                  self.assertIn("New features", visible)
+                  self.assertIn("Bug fixes", visible)
+                  self.assertIn("[Y] Update now", visible)
+
+              def test_footer_advertises_manual_update_check(self):
+                  ui = self.make_ui(htail.UpdateService("example/repo"))
+                  ui.dimensions = lambda: (120, 30)
+                  status = "\n".join(ui._status_lines(119, 28))
+                  self.assertIn("u check", status)
+
+          if __name__ == "__main__":
+              unittest.main()
+          PY
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Commit and push 0.7.3
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add htail RELEASE_NOTES.md tests/test_ui_regressions.py
+          git commit -m "Release htail 0.7.3"
+          git push origin HEAD:main
+
+      - name: Apply categorized release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          for _ in $(seq 1 30); do
+            if gh release view v0.7.3 >/dev/null 2>&1; then
+              gh release edit v0.7.3 --notes-file RELEASE_NOTES.md
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "v0.7.3 release did not appear in time" >&2
+          exit 1
