@@ -1,0 +1,56 @@
+name: Stage htail 0.8.1 modal UI
+
+on:
+  push:
+    branches:
+      - feature/modal-ui-0.8.1
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Apply staged 0.8.1 payload
+        shell: bash
+        run: |
+          base64 -d .staging/modal081.b64 | tar xzf -
+
+      - name: Compile
+        run: python -m compileall -q src tools tests
+
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+      - name: Build standalone executable
+        run: python tools/build_release.py --output /tmp/htail
+
+      - name: Smoke test bundle
+        shell: bash
+        run: |
+          test "$(python /tmp/htail --version)" = "htail 0.8.1"
+          python /tmp/htail --no-self-install-prompt | grep -F "Usage: ht FILE [FILE ...]"
+
+      - name: Commit validated source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/htail_app/app.py src/htail_app/__init__.py RELEASE_NOTES.md tests/test_modal_ui.py
+          git rm .staging/modal081.b64
+          git commit -m "Add modal overlays and update progress for htail 0.8.1"
+          git push origin HEAD:feature/modal-ui-0.8.1
