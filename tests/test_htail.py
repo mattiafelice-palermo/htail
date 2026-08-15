@@ -54,7 +54,15 @@ class WrapTests(unittest.TestCase):
         )
         self.assertGreater(len(rows), 1)
         self.assertTrue(rows[0].startswith("▌ • "))
-        self.assertTrue(all(row.startswith("    ") for row in rows[1:]))
+        self.assertTrue(all(row.startswith("▌   ") for row in rows[1:]))
+
+    def test_changed_wrapped_line_keeps_change_gutter(self):
+        rows = self.visible_rows(
+            "▌ This changed paragraph is deliberately long enough to wrap across several visual rows.",
+            34,
+        )
+        self.assertGreater(len(rows), 1)
+        self.assertTrue(all(row.startswith("▌ ") for row in rows))
 
     def test_numbered_list_preserves_nested_indent(self):
         rows = self.visible_rows(

@@ -27,7 +27,7 @@ Interactive keys
   ?          toggle in-app help
   p          pause/resume automatic jumps to new updates
   c          clear displayed history (watch state is preserved)
-  u          open update confirmation when a newer release is available
+  u          check for updates / confirm an available update
   f          jump to the freshest update header
   [ / ]      previous / next captured update
   Up/Down    scroll one line
@@ -97,11 +97,11 @@ ALT_SCREEN_OFF = "\033[?1049l"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-HTAIL_VERSION = "0.7.0"
+HTAIL_VERSION = "0.7.2"
 ACTIVE_VERIFY_WINDOW = 15.0
-# Set this to "owner/repository" once the public release repository exists.
-# Until then HTAIL_UPDATE_REPO can be used to exercise the updater without
-# changing the script.
+AUTO_UPDATE_CHECK_INTERVAL = 3600.0
+# Public GitHub repository used for background release checks and self-update.
+# HTAIL_UPDATE_REPO can override this for development/testing.
 DEFAULT_UPDATE_REPO = "mattiafelice-palermo/htail"
 DEFAULT_UPDATE_ASSET = "htail"
 DEFAULT_INSTALL_COMMAND = "ht"
@@ -168,12 +168,34 @@ def clip_ansi(text: str, width: int) -> str:
     return "".join(out)
 
 
+def visible_prefix_ansi(text: str, visible_chars: int) -> str:
+    """Return the first `visible_chars` printable characters, preserving ANSI."""
+    if visible_chars <= 0:
+        return ""
+
+    visible = 0
+    out: List[str] = []
+    i = 0
+    while i < len(text) and visible < visible_chars:
+        match = ANSI_RE.match(text, i)
+        if match:
+            out.append(match.group(0))
+            i = match.end()
+            continue
+        out.append(text[i])
+        visible += 1
+        i += 1
+
+    return "".join(out)
+
+
 def wrap_ansi(text: str, width: int) -> List[str]:
     """Soft-wrap ANSI-styled text to `width` printable columns.
 
     Markdown-style list items use a hanging indent: continuation rows align
     with the first character of the list item's text rather than with its
-    bullet/number marker.
+    bullet/number marker. Changed rows that start with the highlighted gutter
+    keep that gutter on wrapped continuation rows.
     """
     if width <= 0:
         return [""]
@@ -182,17 +204,24 @@ def wrap_ansi(text: str, width: int) -> List[str]:
     if len(plain_text) <= width:
         return [text + RESET]
 
+    change_marker_visible = ""
+    change_marker_ansi = ""
+    body_text = plain_text
+    if plain_text.startswith("▌ ") or plain_text.startswith("~ "):
+        change_marker_visible = plain_text[:2]
+        change_marker_ansi = visible_prefix_ansi(text, 2)
+        body_text = plain_text[2:]
+
     # The Markdown renderer has already converted source markers to terminal
     # markers by this stage, so infer the visible content column from those
     # rendered forms. This also preserves nesting indentation.
-    hanging_indent = 0
-    list_match = re.match(
-        r"^(?:(?:▌|~)\s+)?(?:\s*)(?:[•☐☑]|\d+[.)])\s+",
-        plain_text,
-    )
+    body_hanging_indent = 0
+    list_match = re.match(r"^(?:\s*)(?:[•☐☑]|\d+[.)])\s+", body_text)
     if list_match:
-        hanging_indent = list_match.end()
-    continuation_prefix = " " * hanging_indent
+        body_hanging_indent = list_match.end()
+
+    continuation_prefix = change_marker_ansi + (" " * body_hanging_indent)
+    continuation_visible_width = len(change_marker_visible) + body_hanging_indent
 
     lines: List[str] = []
     active = ""
@@ -228,18 +257,18 @@ def wrap_ansi(text: str, width: int) -> List[str]:
                 segment = "".join(current[:last_space_index]).rstrip()
                 remainder_plain = "".join(current[last_space_index:]).lstrip(' 	')
                 lines.append(segment + RESET)
-                current = [continuation_prefix, active] if hanging_indent else [active]
+                current = [continuation_prefix, active] if continuation_visible_width else [active]
                 if remainder_plain:
                     current.append(remainder_plain)
-                    visible = hanging_indent + len(strip_ansi(remainder_plain))
+                    visible = continuation_visible_width + len(strip_ansi(remainder_plain))
                 else:
-                    visible = hanging_indent
+                    visible = continuation_visible_width
                 last_space_index = None
                 last_space_visible = 0
             else:
                 lines.append("".join(current) + RESET)
-                current = [continuation_prefix, active] if hanging_indent else [active]
-                visible = hanging_indent
+                current = [continuation_prefix, active] if continuation_visible_width else [active]
+                visible = continuation_visible_width
                 last_space_index = None
                 last_space_visible = 0
 
@@ -969,15 +998,31 @@ class UpdateService:
     def enabled(self) -> bool:
         return bool(self.repo and "/" in self.repo)
 
-    def start(self) -> None:
-        if not self.enabled or self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._check_worker,
-            name="htail-update-check",
-            daemon=True,
-        )
-        self._thread.start()
+    def start(self, force: bool = False) -> bool:
+        """Start a background release check. Return True if one was started."""
+        if not self.enabled:
+            return False
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            if self._done and not force:
+                return False
+            self._done = False
+            self._error = None
+            if force:
+                self._release = None
+            self._thread = threading.Thread(
+                target=self._check_worker,
+                name="htail-update-check",
+                daemon=True,
+            )
+            thread = self._thread
+        thread.start()
+        return True
+
+    def refresh(self) -> bool:
+        """Force a fresh GitHub release check unless one is already running."""
+        return self.start(force=True)
 
     def snapshot(self) -> Tuple[bool, Optional[ReleaseInfo], Optional[str]]:
         with self._lock:
@@ -1541,6 +1586,8 @@ class TerminalUI:
         self.update_check_error: Optional[str] = None
         self.update_confirm_active = False
         self.update_installing = False
+        self.update_manual_check_pending = False
+        self.last_update_check_monotonic = time.monotonic()
 
         self.lines: List[str] = []
         self.updates: List[UpdateRecord] = []
@@ -1796,10 +1843,17 @@ class TerminalUI:
                 self.set_message("update repository is not configured yet")
                 self.render()
             elif not self.update_check_done:
-                self.set_message("checking for updates…")
+                self.set_message("checking GitHub for updates…")
                 self.render()
             else:
-                self.set_message("already on the latest release")
+                self.update_manual_check_pending = True
+                if self.update_service.refresh():
+                    self.update_check_done = False
+                    self.update_check_error = None
+                    self.last_update_check_monotonic = time.monotonic()
+                    self.set_message("checking GitHub for updates…")
+                else:
+                    self.set_message("update check already in progress")
                 self.render()
             return False
 
@@ -1877,6 +1931,18 @@ class TerminalUI:
         now = time.monotonic() if now is None else now
 
         if self.update_service is not None and self.update_service.enabled:
+            # Long-lived viewers re-check releases hourly. Manual `u` checks are
+            # immediate, so users never have to restart htail to discover a release.
+            if (
+                self.update_release is None
+                and self.update_check_done
+                and now - self.last_update_check_monotonic >= AUTO_UPDATE_CHECK_INTERVAL
+            ):
+                if self.update_service.refresh():
+                    self.update_check_done = False
+                    self.update_check_error = None
+                    self.last_update_check_monotonic = now
+
             done, release, error = self.update_service.snapshot()
             changed = (
                 done != self.update_check_done
@@ -1886,9 +1952,19 @@ class TerminalUI:
             self.update_check_done = done
             self.update_release = release
             self.update_check_error = error
-            if changed and done and release is not None:
-                self.set_message(f"update {release.version} available — press u", duration=5.0)
-                self.render()
+            if changed and done:
+                self.last_update_check_monotonic = now
+                if release is not None:
+                    self.update_manual_check_pending = False
+                    self.set_message(f"update {release.version} available — press u", duration=5.0)
+                    self.render()
+                elif self.update_manual_check_pending:
+                    self.update_manual_check_pending = False
+                    if error:
+                        self.set_message(f"update check failed: {error}", duration=5.0)
+                    else:
+                        self.set_message("already on the latest release", duration=3.0)
+                    self.render()
 
         idle = self.idle_seconds(now)
 

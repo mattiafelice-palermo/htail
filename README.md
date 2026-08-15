@@ -45,7 +45,7 @@ ht -n 0 agent-output.md
 | `f` | Jump to the beginning of the freshest update |
 | `p` | Pause/resume automatic jumps; file changes are still captured |
 | `c` | Clear displayed history without resetting file tracking |
-| `u` | Open the update confirmation dialog when a release is available |
+| `u` | Check GitHub now; if an update is available, open the confirmation dialog |
 | `?` | Toggle help |
 | `q` | Quit |
 
@@ -66,9 +66,9 @@ New updates open at their **first line**, not at their end. While paused, htail 
 
 ## Updates
 
-htail checks the latest GitHub Release in the background while the interactive viewer is open. If a newer release is available, the footer shows an update indicator.
+htail checks the latest GitHub Release when the interactive viewer starts and automatically re-checks once per hour during long-running sessions. Press `u` at any time to force an immediate check. If a newer release is available, the footer shows an update indicator.
 
-Press `u` to open a confirmation dialog. If confirmed, htail:
+Press `u` to check immediately. If a newer release is found, `u` opens a confirmation dialog. If confirmed, htail:
 
 1. downloads the `htail` release asset;
 2. downloads and verifies `htail.sha256`;
