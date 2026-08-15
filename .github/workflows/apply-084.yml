@@ -1,0 +1,262 @@
+name: Apply htail 0.8.4 regressions
+
+on:
+  push:
+    branches: [fix/cli-mouse-static-0.8.4]
+    paths: [.github/workflows/apply-084.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/cli-mouse-static-0.8.4
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply 0.8.4 fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # Version.
+          p = Path('src/htail_app/__init__.py')
+          t = p.read_text()
+          t = t.replace('VERSION = "0.8.3"', 'VERSION = "0.8.4"')
+          p.write_text(t)
+
+          # Core updater: add progress callback and stream the download.
+          p = Path('src/htail_app/core.py')
+          t = p.read_text()
+          t = t.replace('from typing import Iterable, List, Optional, Pattern, Sequence, Tuple', 'from typing import Callable, Iterable, List, Optional, Pattern, Sequence, Tuple')
+          start = t.index('    def install(self, release: ReleaseInfo, target: Path) -> Tuple[bool, str]:')
+          end = t.index('\n\n# ---------------------------------------------------------------------------\n# Self-install support', start)
+          method = '''    def install(\n        self,\n        release: ReleaseInfo,\n        target: Path,\n        progress: Optional[Callable[[str, Optional[int], Optional[int]], None]] = None,\n    ) -> Tuple[bool, str]:\n        \"\"\"Download, validate and atomically replace the running script.\n\n        ``progress`` receives ``(stage, current_bytes, total_bytes)``. Byte\n        counts are supplied while downloading; later validation/install stages\n        use ``None`` counts. Progress callbacks are best-effort and can never\n        abort an otherwise valid update.\n        \"\"\"\n        target = target.resolve()\n        target_dir = target.parent\n        if not target.exists():\n            return False, f\"cannot locate running script: {target}\"\n        if not os.access(target, os.W_OK):\n            return False, f\"running script is not writable: {target}\"\n\n        def report(stage: str, current: Optional[int] = None, total: Optional[int] = None) -> None:\n            if progress is None:\n                return\n            try:\n                progress(stage, current, total)\n            except Exception:\n                pass\n\n        temp_path: Optional[Path] = None\n        try:\n            request = urllib.request.Request(\n                release.asset_url,\n                headers={\"User-Agent\": f\"htail/{HTAIL_VERSION}\"},\n            )\n            with urllib.request.urlopen(request, timeout=15.0) as response:\n                total_header = response.headers.get('Content-Length')\n                total = int(total_header) if total_header and total_header.isdigit() else None\n                chunks: List[bytes] = []\n                current = 0\n                report(\"Downloading release…\", current, total)\n                while True:\n                    chunk = response.read(65536)\n                    if not chunk:\n                        break\n                    chunks.append(chunk)\n                    current += len(chunk)\n                    report(\"Downloading release…\", current, total)\n                content = b''.join(chunks)\n\n            report(\"Verifying SHA-256 checksum…\")\n            expected_sha256: Optional[str] = None\n            if release.checksum_url:\n                checksum_request = urllib.request.Request(\n                    release.checksum_url,\n                    headers={\"User-Agent\": f\"htail/{HTAIL_VERSION}\"},\n                )\n                with urllib.request.urlopen(checksum_request, timeout=10.0) as response:\n                    checksum_text = response.read().decode(\"utf-8\", errors=\"replace\")\n                checksum_match = re.search(r\"\\b([0-9a-fA-F]{64})\\b\", checksum_text)\n                if not checksum_match:\n                    return False, \"release checksum asset does not contain a SHA-256 digest\"\n                expected_sha256 = checksum_match.group(1).lower()\n\n            actual_sha256 = hashlib.sha256(content).hexdigest()\n            if expected_sha256 and actual_sha256 != expected_sha256:\n                return False, \"downloaded update failed SHA-256 verification\"\n\n            try:\n                source = content.decode(\"utf-8\")\n            except UnicodeDecodeError as exc:\n                return False, f\"downloaded update is not UTF-8 text: {exc}\"\n\n            if not source.startswith(\"#!/\"):\n                return False, \"downloaded update does not look like an executable htail script\"\n            if f'HTAIL_VERSION = \"{release.version}\"' not in source:\n                return False, (\n                    f\"downloaded script does not identify itself as version {release.version}\"\n                )\n            try:\n                compile(source, str(target), \"exec\")\n            except SyntaxError as exc:\n                return False, f\"downloaded update failed syntax validation: {exc}\"\n\n            report(\"Preparing update…\")\n            fd, temp_name = tempfile.mkstemp(\n                prefix=f\".{target.name}.update-\",\n                dir=str(target_dir),\n            )\n            temp_path = Path(temp_name)\n            with os.fdopen(fd, \"wb\") as handle:\n                handle.write(content)\n                handle.flush()\n                os.fsync(handle.fileno())\n\n            mode = target.stat().st_mode\n            os.chmod(temp_path, mode)\n\n            report(\"Backing up current executable…\")\n            backup = target.with_name(target.name + \".bak\")\n            shutil.copy2(target, backup)\n            report(\"Installing update…\")\n            os.replace(temp_path, target)\n            temp_path = None\n            return True, (\n                f\"updated {target.name} {HTAIL_VERSION} → {release.version}\"\n                + (\" (SHA-256 verified)\" if expected_sha256 else \"\")\n            )\n        except urllib.error.URLError as exc:\n            return False, f\"update download failed: {exc.reason}\"\n        except OSError as exc:\n            return False, f\"could not install update: {exc}\"\n        finally:\n            if temp_path is not None:\n                try:\n                    temp_path.unlink(missing_ok=True)\n                except OSError:\n                    pass\n'''
+          t = t[:start] + method + t[end:]
+          p.write_text(t)
+
+          # POSIX input: read directly from the fd, not buffered TextIO.
+          p = Path('src/htail_app/input.py')
+          t = p.read_text()
+          old = '''    def _poll_posix(self) -> Optional[InputEvent]:\n        try:\n            import select\n\n            ready, _, _ = select.select([sys.stdin], [], [], 0)\n            if not ready:\n                return None\n            ch = sys.stdin.read(1)\n            if ch != \"\\x1b\":\n                if ch == \"\\t\":\n                    return \"TAB\"\n                return ch\n\n            seq = ch\n            deadline = time.monotonic() + 0.03\n            while time.monotonic() < deadline and len(seq) < 48:\n                more, _, _ = select.select([sys.stdin], [], [], 0.002)\n                if not more:\n                    break\n                seq += sys.stdin.read(1)\n                if seq.startswith(\"\\x1b[<\") and seq[-1:] in (\"M\", \"m\"):\n                    break\n                if not seq.startswith(\"\\x1b[<\") and (seq.endswith(\"~\") or seq in (\"\\x1b[A\", \"\\x1b[B\", \"\\x1b[H\", \"\\x1b[F\", \"\\x1bOH\", \"\\x1bOF\", \"\\x1b[Z\")):\n                    break\n            return parse_escape_sequence(seq)\n        except Exception:\n            return None\n'''
+          new = '''    def _poll_posix(self) -> Optional[InputEvent]:\n        try:\n            import select\n\n            fd = self._fd if self._fd is not None else sys.stdin.fileno()\n            ready, _, _ = select.select([fd], [], [], 0)\n            if not ready:\n                return None\n\n            def read_char() -> str:\n                data = os.read(fd, 1)\n                return data.decode(\"latin1\") if data else \"\"\n\n            ch = read_char()\n            if ch != \"\\x1b\":\n                if ch == \"\\t\":\n                    return \"TAB\"\n                return ch\n\n            seq = ch\n            deadline = time.monotonic() + 0.03\n            while time.monotonic() < deadline and len(seq) < 48:\n                more, _, _ = select.select([fd], [], [], 0.002)\n                if not more:\n                    break\n                seq += read_char()\n                if seq.startswith(\"\\x1b[<\") and seq[-1:] in (\"M\", \"m\"):\n                    break\n                if not seq.startswith(\"\\x1b[<\") and (seq.endswith(\"~\") or seq in (\"\\x1b[A\", \"\\x1b[B\", \"\\x1b[H\", \"\\x1b[F\", \"\\x1bOH\", \"\\x1bOF\", \"\\x1b[Z\")):\n                    break\n            return parse_escape_sequence(seq)\n        except Exception:\n            return None\n'''
+          if old not in t:
+              raise SystemExit('input.py target not found')
+          p.write_text(t.replace(old, new))
+
+          # Watcher: None means full initial file; -n remains available to noninteractive mode.
+          p = Path('src/htail_app/watcher.py')
+          t = p.read_text()
+          old = '''        try:\n            previous, initial_tail = core.read_initial_tail(self.path, self.args.lines, self.args.encoding)\n        except OSError as exc:\n'''
+          new = '''        try:\n            previous = core.read_lines(self.path, self.args.encoding)\n            if self.args.lines is None:\n                initial_tail = list(previous)\n            elif self.args.lines == 0:\n                initial_tail = []\n            else:\n                initial_tail = list(previous[-self.args.lines:])\n        except OSError as exc:\n'''
+          if old not in t:
+              raise SystemExit('watcher.py target not found')
+          p.write_text(t.replace(old, new))
+
+          # Pane: first interactive render follows EOF, and titles expose rows above/below.
+          p = Path('src/htail_app/pane.py')
+          t = p.read_text()
+          t = t.replace('        self._pending_anchor_logical: Optional[int] = None\n', '        self._pending_anchor_logical: Optional[int] = None\n        self._initial_bottom_pending = False\n')
+          t = t.replace('''    def add_initial(self, raw_lines: Sequence[str]) -> None:\n        visible = [line for line in raw_lines if self.display_filter.accepts(line)]\n        self.lines.extend(core.render_initial_lines(visible, self.highlighter))\n        self._mark_layout_dirty()\n        self.waiting = False\n        self.missing = False\n''', '''    def add_initial(self, raw_lines: Sequence[str]) -> None:\n        visible = [line for line in raw_lines if self.display_filter.accepts(line)]\n        self.lines.extend(core.render_initial_lines(visible, self.highlighter))\n        self._mark_layout_dirty()\n        self._initial_bottom_pending = True\n        self.waiting = False\n        self.missing = False\n\n    def _apply_initial_bottom(self, body_height: int) -> None:\n        if not self._initial_bottom_pending:\n            return\n        self.top = max(0, len(self._visual_lines) - max(0, body_height))\n        self._initial_bottom_pending = False\n''')
+          t = t.replace('''    def view_rows(self, width: int, height: int) -> List[str]:\n        width = max(1, width)\n        height = max(0, height)\n        self._ensure_layout(width)\n        self.top = min(max(0, self.top), max(0, len(self._visual_lines) - 1))\n''', '''    def view_rows(self, width: int, height: int) -> List[str]:\n        width = max(1, width)\n        height = max(0, height)\n        self._ensure_layout(width)\n        self._apply_initial_bottom(height)\n        self.top = min(max(0, self.top), max(0, len(self._visual_lines) - 1))\n''')
+          t = t.replace('''    def title(self, index: int, width: int, focused: bool) -> str:\n''', '''    def title(self, index: int, width: int, focused: bool, body_height: Optional[int] = None) -> str:\n''')
+          marker = '''        if self.unseen_updates:\n            parts.append(f\"+{self.unseen_updates} NEW\")\n        idle = self.idle_seconds(now)\n'''
+          replacement = '''        if self.unseen_updates:\n            parts.append(f\"+{self.unseen_updates} NEW\")\n        if body_height is not None and not self.prefer_snapshot:\n            above = min(max(0, self.top), len(self._visual_lines))\n            below = max(0, len(self._visual_lines) - (above + max(0, body_height)))\n            if above:\n                parts.append(f\"↑{above}\")\n            if below:\n                parts.append(f\"↓{below}\")\n        idle = self.idle_seconds(now)\n'''
+          if marker not in t:
+              raise SystemExit('pane title marker not found')
+          t = t.replace(marker, replacement)
+          old = '''        # Resolve pending update anchors before deriving the title/current update.\n        self._ensure_layout(inner)\n        title = self.title(index, max(1, width - 4), focused)\n'''
+          new = '''        # Resolve initial EOF-following and pending update anchors before deriving\n        # the title/current position. Initial view is geometry-based: show the\n        # final screenful after wrapping, or the whole file when it fits.\n        self._ensure_layout(inner)\n        self._apply_initial_bottom(body_h)\n        title = self.title(index, max(1, width - 4), focused, body_h)\n'''
+          if old not in t:
+              raise SystemExit('pane render marker not found')
+          p.write_text(t.replace(old, new))
+
+          # App: -n no longer caps interactive mode; add CLI + interactive progress.
+          p = Path('src/htail_app/app.py')
+          t = p.read_text()
+          t = t.replace('parser.add_argument("-n", "--lines", type=int, default=50, help="initial lines per file (default: 50)")', 'parser.add_argument("-n", "--lines", type=int, default=None, help="initial source-line limit for non-interactive output; interactive mode reads the full file")')
+          t = t.replace('    if args.lines < 0:\n        parser.error("--lines must be >= 0")\n', '    if args.lines is not None and args.lines < 0:\n        parser.error("--lines must be >= 0")\n')
+          start = t.index('    def _install_worker(self, release: core.ReleaseInfo) -> None:')
+          end = t.index('\n    def _status_lines', start)
+          worker = '''    def _install_worker(self, release: core.ReleaseInfo) -> None:\n        \"\"\"Install a confirmed release off the UI thread and schedule restart.\"\"\"\n        target = executable_path()\n\n        def progress(stage: str, current: Optional[int], total: Optional[int]) -> None:\n            self.update_install_status = stage\n            self.update_install_progress = None if current is None else (current, total)\n            self.dirty = True\n\n        try:\n            progress(\"Preparing update…\", None, None)\n            ok, message = self.update_service.install(release, target, progress=progress)\n        except Exception as exc:\n            ok, message = False, f\"update failed: {exc}\"\n\n        self.update_install_result = (ok, message)\n        self.update_installing = False\n        if ok:\n            self.pending_restart = (target, list(sys.argv[1:]), message)\n        self.dirty = True\n'''
+          t = t[:start] + worker + t[end:]
+
+          helper = '''\n\nclass _CLIUpdateProgress:\n    \"\"\"Compact terminal progress reporter used by ``ht --update``.\"\"\"\n\n    def __init__(self, stream) -> None:\n        self.stream = stream\n        self.tty = bool(getattr(stream, 'isatty', lambda: False)())\n        self.last_stage: Optional[str] = None\n        self.open_line = False\n\n    def _newline(self) -> None:\n        if self.open_line:\n            self.stream.write('\\n')\n            self.open_line = False\n\n    def __call__(self, stage: str, current: Optional[int], total: Optional[int]) -> None:\n        if not self.tty:\n            if stage != self.last_stage:\n                self.stream.write(f\"[htail] {stage}\\n\")\n                self.stream.flush()\n            self.last_stage = stage\n            return\n\n        if stage != self.last_stage:\n            self._newline()\n        self.last_stage = stage\n        if current is None:\n            self.stream.write('\\r' + core.CLEAR_LINE + f\"[htail] {stage}\")\n            self.open_line = True\n        elif total and total > 0:\n            frac = max(0.0, min(1.0, current / total))\n            bar_w = 30\n            filled = int(round(bar_w * frac))\n            bar = '█' * filled + '░' * (bar_w - filled)\n            self.stream.write('\\r' + core.CLEAR_LINE + f\"[htail] [{bar}] {frac * 100:5.1f}%  {current:,}/{total:,} bytes\")\n            self.open_line = True\n        else:\n            self.stream.write('\\r' + core.CLEAR_LINE + f\"[htail] Downloading… {current:,} bytes\")\n            self.open_line = True\n        self.stream.flush()\n\n    def finish(self) -> None:\n        self._newline()\n        self.stream.flush()\n'''
+          anchor = '\n\ndef run_interactive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter, update_service: core.UpdateService) -> int:\n'
+          if anchor not in t:
+              raise SystemExit('run_interactive anchor not found')
+          t = t.replace(anchor, helper + anchor)
+          t = t.replace('''def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter, update_service: core.UpdateService) -> int:\n    app = MultiApp(args, color, display_filter, update_service)\n''', '''def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter, update_service: core.UpdateService) -> int:\n    # Full-screen panes read the complete current file. The viewport itself\n    # decides how much fits after wrapping, so a fixed source-line cap is not\n    # meaningful in interactive mode. -n is retained only for compatibility\n    # with non-interactive tail-like output.\n    args.lines = None\n    app = MultiApp(args, color, display_filter, update_service)\n''')
+          t = t.replace('''def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter) -> int:\n    panes: List[Pane] = []\n''', '''def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter) -> int:\n    if args.lines is None:\n        args.lines = 50\n    panes: List[Pane] = []\n''')
+          old = '''        ok, message = update_service.install(release, executable_path())\n        print(f\"[htail] {message}\", file=sys.stdout if ok else sys.stderr)\n        return 0 if ok else 1\n'''
+          new = '''        cli_progress = _CLIUpdateProgress(sys.stdout)\n        ok, message = update_service.install(release, executable_path(), progress=cli_progress)\n        cli_progress.finish()\n        print(f\"[htail] {message}\", file=sys.stdout if ok else sys.stderr)\n        return 0 if ok else 1\n'''
+          if old not in t:
+              raise SystemExit('CLI update target not found')
+          p.write_text(t.replace(old, new))
+
+          # README semantics.
+          p = Path('README.md')
+          t = p.read_text()
+          t = t.replace('`-n` controls **only the initial context per file**. Once htail is running, every observed change is retained.', 'Interactive htail reads the **full current file** and initially positions each pane at EOF: if the file fits, the whole file is visible; otherwise the pane shows the final screenful after wrapping. `-n` is retained only for non-interactive tail-like output.')
+          t = t.replace('After confirmation htail downloads the release asset and checksum, verifies SHA-256, keeps a `.bak` copy, atomically replaces itself, and reopens **all watched files with the same command-line options**.', 'After confirmation htail downloads the release asset with a progress bar, verifies SHA-256, keeps a `.bak` copy, atomically replaces itself, and reopens **all watched files with the same command-line options**. `ht --update` uses the same progress reporting.')
+          t = t.replace('ht -n 0 file.md\n', 'ht -n 20 file.md  # non-interactive initial context override\n')
+          p.write_text(t)
+
+          # Release notes.
+          Path('RELEASE_NOTES.md').write_text('''# htail 0.8.4\n\n## New features\n\n- Interactive startup is now geometry-based: each pane reads the full file and opens at EOF, showing the whole file when it fits or the final screenful after wrapping when it does not.\n- Pane titles show visual rows above/below the viewport (`↑N` / `↓N`) whenever more retained content exists.\n- `ht --update` now uses the same staged download progress reporting as the in-app updater.\n\n## Bug fixes\n\n- Fixed POSIX/WSL mouse input by reading escape sequences directly from the terminal file descriptor instead of Python's buffered text stream, which could strand bytes and drop clicks/wheel events.\n- Restored byte-level progress updates in the interactive updater while keeping checksum verification, backup, atomic replacement and automatic restart.\n- Removed the legacy 50-source-line cap from interactive mode; `-n` remains accepted for non-interactive compatibility only.\n''')
+
+          # Bundle version assertion.
+          p = Path('tests/test_bundle.py')
+          t = p.read_text().replace('htail 0.8.3', 'htail 0.8.4').replace('HTAIL_VERSION = "0.8.3"', 'HTAIL_VERSION = "0.8.4"')
+          p.write_text(t)
+
+          # New regression tests.
+          Path('tests/test_regressions_084.py').write_text(r'''from pathlib import Path
+import hashlib
+import io
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from htail_app import core
+from htail_app.app import _CLIUpdateProgress, parse_args
+from htail_app.input import InputReader, MouseEvent
+from htail_app.pane import Pane
+from htail_app.watcher import FileFollower
+
+
+class TTYBuffer(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class FakeResponse:
+    def __init__(self, payload: bytes, content_length=True):
+        self.payload = payload
+        self.offset = 0
+        self.headers = {'Content-Length': str(len(payload))} if content_length else {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = len(self.payload) - self.offset
+        chunk = self.payload[self.offset:self.offset+n]
+        self.offset += len(chunk)
+        return chunk
+
+
+class Htail084Regressions(unittest.TestCase):
+    def make_pane(self):
+        path = Path('example.md')
+        return Pane(path, core.SyntaxHighlighter(path, 'none', False), core.DisplayFilter(), False, 300)
+
+    def test_interactive_lines_default_is_geometry_driven(self):
+        self.assertIsNone(parse_args(['example.md']).lines)
+
+    def test_follower_with_no_line_limit_returns_full_initial_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'log.txt'
+            path.write_text(''.join(f'line {i}\n' for i in range(80)), encoding='utf-8')
+            args = parse_args([str(path), '--no-self-install-prompt'])
+            follower = FileFollower(path, args)
+            notice = follower.initialize_if_available()
+            self.assertEqual(len(notice.initial_tail), 80)
+            self.assertEqual(notice.initial_tail[-1], 'line 79\n')
+
+    def test_initial_view_opens_at_last_visual_screenful_and_home_recovers_start(self):
+        pane = self.make_pane()
+        pane.add_initial([f'line {i} with enough text to wrap somewhat\n' for i in range(20)])
+        rows = [core.strip_ansi(row).rstrip() for row in pane.view_rows(24, 5)]
+        self.assertTrue(any('line 19' in row for row in rows))
+        self.assertFalse(any('line 0 ' in row for row in rows))
+        title = core.strip_ansi(pane.title(0, 80, True, 5))
+        self.assertIn('↑', title)
+        pane.scroll('HOME', 5)
+        rows = [core.strip_ansi(row).rstrip() for row in pane.view_rows(24, 5)]
+        self.assertTrue(any('line 0 ' in row for row in rows))
+        title = core.strip_ansi(pane.title(0, 80, True, 5))
+        self.assertIn('↓', title)
+
+    def test_posix_reader_parses_back_to_back_mouse_sequences_without_textio_buffering(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            reader = InputReader(mouse=True)
+            reader.enabled = True
+            reader._fd = read_fd
+            os.write(write_fd, b'\x1b[<0;75;5M\x1b[<64;75;5M')
+            first = reader._poll_posix()
+            second = reader._poll_posix()
+            self.assertEqual(first, MouseEvent(x=74, y=4, button='left', pressed=True))
+            self.assertEqual(second, MouseEvent(x=74, y=4, button='wheel_up', pressed=True))
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+    def test_update_service_reports_download_progress_and_install_phases(self):
+        content = b'#!/usr/bin/env python3\nHTAIL_VERSION = "9.9.9"\nprint("ok")\n'
+        checksum = (hashlib.sha256(content).hexdigest() + '  htail\n').encode()
+        release = core.ReleaseInfo('9.9.9', 'v9.9.9', 'https://example/htail', 'htail', 'https://example/sha')
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / 'htail'
+            target.write_text('#!/usr/bin/env python3\nHTAIL_VERSION = "0.8.3"\n', encoding='utf-8')
+            target.chmod(0o755)
+            service = core.UpdateService('example/repo')
+            with mock.patch('htail_app.core.urllib.request.urlopen', side_effect=[FakeResponse(content), FakeResponse(checksum)]):
+                ok, _ = service.install(release, target, progress=lambda stage, current, total: events.append((stage, current, total)))
+        self.assertTrue(ok)
+        downloads = [event for event in events if event[0] == 'Downloading release…']
+        self.assertGreaterEqual(len(downloads), 2)
+        self.assertEqual(downloads[-1][1:], (len(content), len(content)))
+        stages = [event[0] for event in events]
+        self.assertIn('Verifying SHA-256 checksum…', stages)
+        self.assertIn('Backing up current executable…', stages)
+        self.assertIn('Installing update…', stages)
+
+    def test_cli_progress_renders_bar_and_percentage(self):
+        stream = TTYBuffer()
+        progress = _CLIUpdateProgress(stream)
+        progress('Downloading release…', 50, 100)
+        progress('Downloading release…', 100, 100)
+        progress.finish()
+        rendered = stream.getvalue()
+        self.assertIn('100.0%', rendered)
+        self.assertIn('100/100 bytes', rendered)
+        self.assertIn('█', rendered)
+
+
+if __name__ == '__main__':
+    unittest.main()
+''')
+          PY
+      - name: Compile
+        run: python -m compileall -q src tests tools
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Build standalone executable
+        run: python tools/build_release.py --output /tmp/htail
+      - name: Smoke test bundle
+        run: |
+          python /tmp/htail --version
+          test "$(python /tmp/htail --version)" = "htail 0.8.4"
+      - name: Commit validated fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests README.md RELEASE_NOTES.md
+          git commit -m "Fix CLI progress mouse input and initial viewport in htail 0.8.4"
+          git push origin HEAD:fix/cli-mouse-static-0.8.4
