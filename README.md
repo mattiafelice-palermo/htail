@@ -72,7 +72,7 @@ Press `l` while htail is running to switch layout without restarting. Pane scrol
 
 Mouse tracking can be disabled with `--no-mouse`. Keyboard controls always remain available.
 
-A new update moves **only its own pane** to the beginning of that update. Other panes keep their current reading position. While a pane is paused, changes are still captured and its title reports unseen updates.
+A new update moves **only its own pane** to the beginning of that update. Other panes keep their current reading position. While a pane is paused, changes are still captured and its title reports unseen updates. The focused pane is visually distinguished from the others.
 
 ## Display features
 
