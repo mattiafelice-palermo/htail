@@ -6,6 +6,7 @@ on:
       - feature/search-glob-perf-0.10.0
     paths:
       - .github/finalize_010.py
+      - .github/finalize_010_screenfix.py
       - .github/workflows/finalize-010.yml
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
         with:
           python-version: "3.x"
       - name: Apply final refinements
-        run: python .github/finalize_010.py
+        run: |
+          python .github/finalize_010.py
+          python .github/finalize_010_screenfix.py
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
       - name: Run tests
