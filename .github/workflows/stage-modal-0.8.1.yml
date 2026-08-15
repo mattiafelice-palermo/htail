@@ -35,6 +35,16 @@ jobs:
           text = text.replace('core.paint(top_plain, core.BOLD_LIGHT_CYAN, True)', 'core.paint(top_plain, core.BOLD_LIGHT_CYAN, color)')
           text = text.replace('core.paint(bottom_plain, core.BOLD_LIGHT_CYAN, True)', 'core.paint(bottom_plain, core.BOLD_LIGHT_CYAN, color)')
           text = text.replace('core.paint(side_plain, core.CYAN, True)', 'core.paint(side_plain, core.CYAN, color)')
+          text = text.replace(
+              '        rows = [_pad(line, width) for line in rows[:height]] + [" " * width] * max(0, height - len(rows))\n',
+              '        if not color:\n            rows = [core.strip_ansi(row) for row in rows]\n        rows = [_pad(line, width) for line in rows[:height]] + [" " * width] * max(0, height - len(rows))\n',
+              1,
+          )
+          text = text.replace(
+              '    for line in content:\n        rendered.extend(core.wrap_ansi(line, inner_width) if line else [""])\n    limit = max(1, height - 4)\n',
+              '    for line in content:\n        rendered.extend(core.wrap_ansi(line, inner_width) if line else [""])\n    if not color:\n        rendered = [core.strip_ansi(row) for row in rendered]\n    limit = max(1, height - 4)\n',
+              1,
+          )
           app.write_text(text, encoding='utf-8')
 
           bundle = Path('tests/test_bundle.py')
