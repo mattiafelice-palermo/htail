@@ -189,9 +189,15 @@ def _slice_ansi(text: str, start: int, width: int) -> str:
 
 
 def _dim_line(text: str, color: bool) -> str:
-    if not color or not text.strip():
+    if not color:
         return text
-    return core.DIM + text + core.RESET
+    # Embedded syntax-highlight resets cancel SGR 2 (dim). Strip the background
+    # styling first, then apply one uniform dim style so a modal always reads
+    # as foreground over a subdued pane rather than over fully bright colours.
+    plain = core.strip_ansi(text)
+    if not plain.strip():
+        return plain
+    return core.DIM + plain + core.RESET
 
 
 def _panel_geometry(title: str, content: Sequence[str], width: int, height: int, color: bool) -> Tuple[int, int, int, int, List[str]]:
@@ -313,6 +319,7 @@ class MultiApp:
             notice = follower.initialize_if_available()
             if notice and notice.initial_tail is not None:
                 pane.add_initial(notice.initial_tail)
+                pane.set_snapshot(follower.previous)
                 self._stream_initial(len(self.panes), pane, notice.initial_tail)
             else:
                 pane.waiting = True
@@ -585,6 +592,13 @@ class MultiApp:
         return None
 
     def handle_mouse(self, event: MouseEvent) -> None:
+        # SGR mouse mode emits a release event after a click. Never let that
+        # release move focus: its coordinates can be in a different pane if
+        # the pointer moved after the press, which made focus appear to jump
+        # back or require a second click.
+        if event.button == "left" and not event.pressed:
+            return
+
         target = self._pane_at(event.x, event.y)
         if target is None:
             return
@@ -593,7 +607,7 @@ class MultiApp:
             pane = self.panes[target]
         else:
             pane = self.stream
-        if event.button == "left" and event.pressed:
+        if event.button == "left":
             self.dirty = True
             return
         if event.button in ("wheel_up", "wheel_down"):
@@ -751,6 +765,7 @@ class MultiApp:
             if isinstance(result, WatchNotice):
                 if result.kind in ("initial", "resumed") and result.initial_tail is not None:
                     pane.add_initial(result.initial_tail)
+                    pane.set_snapshot(follower.previous)
                     self._stream_initial(index, pane, result.initial_tail)
                     if result.kind == "resumed":
                         pane.set_message("resumed")
@@ -781,6 +796,11 @@ class MultiApp:
                     self.args.mark_replacements,
                     result.now_monotonic,
                 )
+                pane.set_snapshot(
+                    result.current_snapshot,
+                    result.changed_new_indices,
+                    prefer=not pane.paused,
+                )
                 self.stream.add_source_update(index, pane.name, header, rendered, result.now_monotonic)
                 self.dirty = True
 
@@ -792,8 +812,18 @@ def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.
     try:
         with app, InputReader(mouse=not args.no_mouse) as reader:
             while True:
-                event = reader.poll()
-                if event is not None and app.handle_input(event):
+                # Drain a bounded burst of queued terminal input before the
+                # watcher/render pass. A 100 ms file poll interval should not
+                # collapse three quick arrow presses into one sluggish step.
+                quit_requested = False
+                for _ in range(64):
+                    event = reader.poll()
+                    if event is None:
+                        break
+                    if app.handle_input(event):
+                        quit_requested = True
+                        break
+                if quit_requested:
                     break
                 now = time.monotonic()
                 app.process_watchers(now)

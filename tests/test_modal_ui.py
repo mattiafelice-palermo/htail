@@ -29,6 +29,14 @@ class ModalRenderingTests(unittest.TestCase):
         rows = app._panel_lines("Layout", ["hello"], 80, 20, False)
         self.assertTrue(all("\x1b[" not in row for row in rows))
 
+    def test_dim_line_neutralizes_embedded_bright_styles(self):
+        bright = core.paint("bright background", core.BOLD_LIGHT_CYAN, True)
+        dimmed = app._dim_line(bright, True)
+        self.assertIn(core.DIM, dimmed)
+        self.assertNotIn(core.BOLD_LIGHT_CYAN, dimmed)
+        self.assertEqual(core.strip_ansi(dimmed), "bright background")
+
+
 
 if __name__ == "__main__":
     unittest.main()

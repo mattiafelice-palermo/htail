@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import difflib
 from pathlib import Path
 import time
 from typing import List, Optional, Sequence, Tuple
@@ -17,6 +18,8 @@ class WatchUpdate:
     deleted: int
     elapsed: Optional[float]
     now_monotonic: float
+    current_snapshot: Sequence[str]
+    changed_new_indices: Sequence[int]
 
 
 @dataclass
@@ -24,6 +27,49 @@ class WatchNotice:
     kind: str  # initial, missing, resumed, error
     text: str = ""
     initial_tail: Optional[List[str]] = None
+
+
+def _changed_new_indices(old: Sequence[str], new: Sequence[str]) -> List[int]:
+    """Return current-snapshot row indexes that were added or replaced.
+
+    This mirrors core.compute_changes()'s position-anchored diff semantics so
+    repetitive coordination files do not align a fresh tail with older blocks.
+    Deletions have no row in the new snapshot and therefore no gutter index.
+    """
+    old_keys = [core._line_identity(line) for line in old]
+    new_keys = [core._line_identity(line) for line in new]
+
+    prefix = 0
+    prefix_limit = min(len(old), len(new))
+    while prefix < prefix_limit and old_keys[prefix] == new_keys[prefix]:
+        prefix += 1
+
+    if prefix == len(old) and len(new) >= len(old):
+        return list(range(prefix, len(new)))
+
+    suffix = 0
+    suffix_limit = min(len(old) - prefix, len(new) - prefix)
+    while (
+        suffix < suffix_limit
+        and old_keys[len(old) - 1 - suffix] == new_keys[len(new) - 1 - suffix]
+    ):
+        suffix += 1
+
+    old_end = len(old) - suffix if suffix else len(old)
+    new_end = len(new) - suffix if suffix else len(new)
+    if suffix == 0:
+        return list(range(prefix, new_end))
+
+    matcher = difflib.SequenceMatcher(
+        a=old_keys[prefix:old_end],
+        b=new_keys[prefix:new_end],
+        autojunk=False,
+    )
+    changed: List[int] = []
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "replace"):
+            changed.extend(range(prefix + j1, prefix + j2))
+    return changed
 
 
 class FileFollower:
@@ -142,6 +188,7 @@ class FileFollower:
             stable_signature = verified_signature
         self.last_content_verify = now
         events, added, replaced, deleted = core.compute_changes(self.previous, current)
+        changed_new_indices = _changed_new_indices(self.previous, current)
         self.previous = current
         self.signature = stable_signature
 
@@ -162,4 +209,6 @@ class FileFollower:
             deleted=deleted,
             elapsed=elapsed,
             now_monotonic=now,
+            current_snapshot=current,
+            changed_new_indices=changed_new_indices,
         )

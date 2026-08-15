@@ -32,6 +32,25 @@ class PaneTests(unittest.TestCase):
         pane.view_rows(40, 4)
         self.assertEqual(pane._logical_at_top(), before)
 
+    def test_short_snapshot_shows_whole_file_and_marks_changed_row(self):
+        pane = self.make_pane(Path("short.md"))
+        pane.add_initial(["old tail\n"])
+        pane.add_update(1, [("replace", ["changed\n"])], 0, 1, 1, None, False, False, 10.0)
+        pane.set_snapshot(["first\n", "second\n", "changed\n"], [2], prefer=True)
+        body = pane._snapshot_view_rows(40, 6)
+        plain = [core.strip_ansi(row).rstrip() for row in body]
+        self.assertEqual(plain[:3], ["first", "second", "▌ changed"])
+
+    def test_pane_top_border_closes_at_exact_right_edge(self):
+        pane = self.make_pane(Path("a.md"))
+        pane.add_initial(["hello\n"])
+        rows = pane.render_box(40, 8, True, 0)
+        visible = [core.strip_ansi(row) for row in rows]
+        self.assertTrue(all(len(row) == 40 for row in visible))
+        self.assertTrue(visible[0].endswith("╮"))
+        self.assertTrue(visible[1].endswith("│"))
+
+
 
 class MultiAppInteractionTests(unittest.TestCase):
     def test_layout_switch_and_mouse_focus_preserve_pane_state(self):
@@ -48,6 +67,20 @@ class MultiAppInteractionTests(unittest.TestCase):
             app._pane_boxes(100, 20)
             app.handle_input(MouseEvent(x=75, y=5, button="left", pressed=True))
             self.assertEqual(app.focus, 1)
+
+    def test_mouse_release_does_not_change_focus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a.md"; b = Path(tmp) / "b.md"
+            a.write_text("a\n", encoding="utf-8"); b.write_text("b\n", encoding="utf-8")
+            args = parse_args([str(a), str(b), "--layout", "columns", "--no-color", "--no-self-install-prompt"])
+            filt = core.compile_display_filter(args)
+            app = MultiApp(args, False, filt, core.UpdateService("example/repo"))
+            app._pane_boxes(100, 20)
+            app.handle_input(MouseEvent(x=75, y=5, button="left", pressed=True))
+            self.assertEqual(app.focus, 1)
+            app.handle_input(MouseEvent(x=10, y=5, button="left", pressed=False))
+            self.assertEqual(app.focus, 1)
+
 
 
 if __name__ == "__main__":

@@ -210,6 +210,12 @@ def wrap_ansi(text: str, width: int) -> List[str]:
     if plain_text.startswith("▌ ") or plain_text.startswith("~ "):
         change_marker_visible = plain_text[:2]
         change_marker_ansi = visible_prefix_ansi(text, 2)
+        # visible_prefix_ansi deliberately stops after the requested printable
+        # characters, which means a painted gutter's trailing RESET is not
+        # included. Re-close the gutter style before reusing it on continuation
+        # rows; otherwise cyan/bold leaks into wrapped Markdown text.
+        if ANSI_RE.search(change_marker_ansi) and not change_marker_ansi.endswith(RESET):
+            change_marker_ansi += RESET
         body_text = plain_text[2:]
 
     # The Markdown renderer has already converted source markers to terminal

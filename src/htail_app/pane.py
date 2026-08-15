@@ -58,6 +58,13 @@ class Pane:
         self._visual_to_logical: List[int] = []
         self._pending_anchor_logical: Optional[int] = None
 
+        # Independently retain the current verified file snapshot. History is
+        # still kept in self.lines; this snapshot is used only when the whole
+        # current file fits in the pane after an update.
+        self.snapshot_raw: List[str] = []
+        self.snapshot_changed: set[int] = set()
+        self.prefer_snapshot = False
+
     @property
     def name(self) -> str:
         return self.path.name or str(self.path)
@@ -114,6 +121,47 @@ class Pane:
         if not self._visual_to_logical:
             return 0
         return self._visual_to_logical[min(max(0, self.top), len(self._visual_to_logical) - 1)]
+
+    def set_snapshot(
+        self,
+        raw_lines: Sequence[str],
+        changed_indices: Sequence[int] = (),
+        *,
+        prefer: bool = False,
+    ) -> None:
+        self.snapshot_raw = list(raw_lines)
+        self.snapshot_changed = set(changed_indices)
+        if prefer:
+            self.prefer_snapshot = True
+
+    def _snapshot_view_rows(self, width: int, height: int) -> Optional[List[str]]:
+        if not self.prefer_snapshot or not self.snapshot_raw or height <= 0:
+            return None
+
+        indexed = [
+            (index, line)
+            for index, line in enumerate(self.snapshot_raw)
+            if self.display_filter.accepts(line)
+        ]
+        if not indexed or len(indexed) > height:
+            return None
+
+        raw_visible = [line for _, line in indexed]
+        if self.highlighter.enabled:
+            styled = self.highlighter.render_lines(raw_visible)
+        else:
+            styled = [line.rstrip("\r\n") for line in raw_visible]
+
+        visual: List[str] = []
+        for (source_index, _), row in zip(indexed, styled):
+            if source_index in self.snapshot_changed:
+                row = core.paint("▌ ", core.BOLD_LIGHT_CYAN, self.color) + row
+            wrapped = core.wrap_ansi(row, width) or [""]
+            visual.extend(wrapped)
+            if len(visual) > height:
+                return None
+
+        return [_pad_ansi(row, width) for row in visual] + [" " * width] * max(0, height - len(visual))
 
     def add_initial(self, raw_lines: Sequence[str]) -> None:
         visible = [line for line in raw_lines if self.display_filter.accepts(line)]
@@ -192,21 +240,25 @@ class Pane:
     def toggle_pause(self) -> None:
         self.paused = not self.paused
         if self.paused:
+            self.prefer_snapshot = False
             self.set_message("paused")
         else:
             self.unseen_updates = 0
             if self.updates:
                 self._pending_anchor_logical = self.updates[-1].start
+                self.prefer_snapshot = True
             self.set_message("resumed at freshest update")
 
     def freshest(self) -> None:
         if self.updates:
             self._pending_anchor_logical = self.updates[-1].start
             self.unseen_updates = 0
+            self.prefer_snapshot = True
 
     def previous_update(self) -> None:
         if not self.updates:
             return
+        self.prefer_snapshot = False
         current = self._logical_at_top()
         candidates = [u for u in self.updates if u.start < current]
         target = candidates[-1] if candidates else self.updates[0]
@@ -215,6 +267,7 @@ class Pane:
     def next_update(self) -> None:
         if not self.updates:
             return
+        self.prefer_snapshot = False
         current = self._logical_at_top()
         candidates = [u for u in self.updates if u.start > current]
         target = candidates[0] if candidates else self.updates[-1]
@@ -226,12 +279,16 @@ class Pane:
         self.top = 0
         self.unseen_updates = 0
         self._pending_anchor_logical = None
+        self.prefer_snapshot = False
         self._mark_layout_dirty()
         self.set_message("display cleared; tracking continues")
 
     def scroll(self, command: str, body_height: int) -> None:
         if not self._visual_lines:
             return
+        # Manual scrolling means the user wants the retained history rather
+        # than the automatic short-file snapshot.
+        self.prefer_snapshot = False
         page = max(1, body_height - 2)
         if command == "UP":
             self.top -= 1
@@ -256,6 +313,8 @@ class Pane:
         return [_pad_ansi(row, width) for row in rows] + [" " * width] * max(0, height - len(rows))
 
     def current_update_number(self) -> Optional[int]:
+        if self.prefer_snapshot and self.updates:
+            return self.updates[-1].number
         current = self._logical_at_top()
         result: Optional[int] = None
         for update in self.updates:
@@ -301,7 +360,10 @@ class Pane:
         title_plain = core.strip_ansi(title)
         title = core.clip_ansi(title, max(1, width - 4))
         visible = len(core.strip_ansi(title))
-        remaining = max(0, width - 4 - visible)
+        # Corners + the leading separator consume three cells. The title
+        # is already clipped to width-4, guaranteeing at least one trailing
+        # dash while keeping the top border exactly `width` cells wide.
+        remaining = max(1, width - 3 - visible)
         top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + "╮"
         if self.color:
             border_style = core.BOLD_LIGHT_CYAN if focused else core.DIM
@@ -313,7 +375,8 @@ class Pane:
             side = "│"
             bottom = "╰" + "─" * (width - 2) + "╯"
 
-        body = self.view_rows(inner, body_h)
+        snapshot_body = self._snapshot_view_rows(inner, body_h)
+        body = snapshot_body if snapshot_body is not None else self.view_rows(inner, body_h)
         rows = [_pad_ansi(top, width)]
         rows.extend(_pad_ansi(side + row + side, width) for row in body)
         rows.append(_pad_ansi(bottom, width))

@@ -69,6 +69,20 @@ class WatcherTests(unittest.TestCase):
             self.assertIsInstance(update, WatchUpdate)
             self.assertEqual(update.added, 1)
 
+    def test_update_carries_current_snapshot_and_changed_indexes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "short.log"
+            path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            follower = FileFollower(path, self.args())
+            follower.initialize_if_available()
+            path.write_text("one\ntwo\nTHREE\n", encoding="utf-8")
+            now = time.monotonic()
+            self.assertIsNone(follower.poll(now))
+            update = follower.poll(now + 0.001)
+            self.assertEqual(list(update.current_snapshot), ["one\n", "two\n", "THREE\n"])
+            self.assertEqual(list(update.changed_new_indices), [2])
+
+
 
 if __name__ == "__main__":
     unittest.main()

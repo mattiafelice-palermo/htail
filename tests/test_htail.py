@@ -43,6 +43,15 @@ class WrapTests(unittest.TestCase):
         self.assertGreater(len(rows), 1)
         self.assertTrue(all(row.startswith("      ") for row in rows[1:]))
 
+    def test_colored_change_gutter_does_not_leak_into_wrapped_text(self):
+        gutter = htail.paint("▌ ", htail.BOLD_LIGHT_CYAN, True)
+        rows = htail.wrap_ansi(gutter + "plain words that wrap onto another visual row without inheriting cyan", 28)
+        self.assertGreater(len(rows), 1)
+        for row in rows[1:]:
+            prefix_end = row.find(" ") + 1
+            self.assertIn(htail.RESET, row[: max(prefix_end + len(htail.RESET), 1)])
+
+
 
 class DiffTests(unittest.TestCase):
     def test_initial_line_limit_never_caps_follow_updates(self):

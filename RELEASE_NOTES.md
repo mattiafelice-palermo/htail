@@ -1,11 +1,13 @@
-# htail 0.8.1
+# htail 0.8.2
 
 ## New features
 
-- Modal-style overlays now preserve the live pane view in the background and dim it, so update, layout, and help dialogs read as true terminal modals rather than replacing the screen.
-- The in-app updater now shows live installation phases and a download progress bar with percentage and byte counts when the server provides a content length; otherwise it shows an indeterminate progress animation.
+- When an updated file fits completely inside its pane, htail now shows the full current file and marks the changed rows with the cyan change gutter instead of showing only the changed fragment. Manual scrolling or update navigation still opens the retained update history.
 
 ## Bug fixes
 
-- Fixed modal panel top-border/title composition so centered titles no longer break or misalign the upper border.
-- Update installation now stays responsive while the download and checksum verification run in a background worker, while file watching continues underneath the modal.
+- Mouse focus now reacts only to the button press, so the release event cannot move focus to whichever pane the pointer reached afterward.
+- Queued keyboard and mouse events are drained in one UI frame, making repeated arrow-key scrolling and fast pane clicks responsive instead of advancing roughly once per watcher poll.
+- Fixed ANSI state leakage from wrapped cyan change gutters that could turn apparently random Markdown continuation text cyan/bold.
+- Modal backgrounds now reliably dim even when the underlying pane contains syntax-highlight ANSI resets.
+- Fixed pane top-border width calculation so the top-right corner joins the right border without a one-cell gap.
