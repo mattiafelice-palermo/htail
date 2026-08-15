@@ -18,16 +18,58 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply 0.7.3 script patch
+      - name: Apply 0.7.3 changes
         shell: bash
         run: |
           python - <<'PY'
-          import base64, gzip
-          data = '''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'''
-          open('/tmp/update.patch','wb').write(gzip.decompress(base64.b64decode(data)))
+          from pathlib import Path
+
+          path = Path('htail')
+          text = path.read_text(encoding='utf-8')
+          assert 'HTAIL_VERSION = "0.7.2"' in text
+          text = text.replace('HTAIL_VERSION = "0.7.2"', 'HTAIL_VERSION = "0.7.3"', 1)
+
+          release_block = '''@dataclass(frozen=True)\nclass ReleaseInfo:\n    version: str\n    tag: str\n    asset_url: str\n    asset_name: str\n    checksum_url: Optional[str] = None\n'''
+          assert release_block in text
+          release_block += '''    notes: str = ""\n\n\ndef _clean_release_note_line(text: str) -> str:\n    """Reduce simple Markdown in release notes to compact terminal text."""\n    text = text.strip()\n    text = re.sub(r"^[-*+]\\s+", "", text)\n    text = re.sub(r"`([^`]+)`", r"\\1", text)\n    text = re.sub(r"\\*\\*([^*]+)\\*\\*|__([^_]+)__", lambda m: m.group(1) or m.group(2), text)\n    text = re.sub(r"\\[([^\\]]+)\\]\\([^)]+\\)", r"\\1", text)\n    return text.strip()\n\n\ndef release_note_sections(notes: str) -> Tuple[List[str], List[str], List[str]]:\n    """Return categorized (features, bug fixes, other) GitHub release notes."""\n    features: List[str] = []\n    fixes: List[str] = []\n    other: List[str] = []\n    section: Optional[str] = None\n    for raw in notes.splitlines():\n        line = raw.strip()\n        if not line:\n            continue\n        heading = re.match(r"^#{1,6}\\s+(.+)$", line)\n        if heading:\n            name = heading.group(1).strip().lower()\n            if "feature" in name or "enhancement" in name or name == "new":\n                section = "features"\n            elif "bug" in name or name in {"fixes", "fix"}:\n                section = "fixes"\n            else:\n                section = None\n            continue\n        if re.match(r"^[-*+]\\s+", line):\n            item = _clean_release_note_line(line)\n            if section == "features":\n                features.append(item)\n            elif section == "fixes":\n                fixes.append(item)\n            else:\n                other.append(item)\n    return features, fixes, other\n'''
+          old_release = '''@dataclass(frozen=True)\nclass ReleaseInfo:\n    version: str\n    tag: str\n    asset_url: str\n    asset_name: str\n    checksum_url: Optional[str] = None\n'''
+          text = text.replace(old_release, release_block, 1)
+
+          text = text.replace(
+              '        version = tag.lstrip("vV")\n        if not tag or not is_newer_version(version, HTAIL_VERSION):',
+              '        version = tag.lstrip("vV")\n        notes = str(payload.get("body") or "")\n        if not tag or not is_newer_version(version, HTAIL_VERSION):',
+              1,
+          )
+          text = text.replace(
+              '            checksum_url=checksum_url,\n        )',
+              '            checksum_url=checksum_url,\n            notes=notes,\n        )',
+              1,
+          )
+
+          body_anchor = '''    def body_height(self) -> int:\n        width, height = self.dimensions()\n        return max(1, height - self.footer_height(width))\n'''
+          assert body_anchor in text
+          content_width = '''    def content_width(self) -> int:\n        # Keep the terminal's final physical column unused. Filling it can set\n        # an implicit-wrap flag, causing the next newline to consume an extra\n        # row and letting the fixed footer overwrite body content.\n        return max(1, self.dimensions()[0] - 1)\n\n'''
+          text = text.replace(body_anchor, content_width + body_anchor, 1)
+          text = text.replace('            width = self.dimensions()[0]\n        self._ensure_layout(width)', '            width = self.content_width()\n        self._ensure_layout(width)')
+          text = text.replace('        width = self.dimensions()[0]\n        self._ensure_layout(width)', '        width = self.content_width()\n        self._ensure_layout(width)')
+
+          old_controls = '''        update_control = " · u update" if self.update_release is not None else ""\n        if width >= 108:\n            controls = "↑↓/Pg scroll · [/] update · f newest · p pause · c clear" + update_control + " · q quit · ? help"\n        else:\n            controls = "↑↓/Pg · [/] update · f newest · p pause · c clear" + update_control + " · q quit · ? help"\n'''
+          new_controls = '''        if self.update_release is not None:\n            update_control = " · u update"\n        elif self.update_service is not None and self.update_service.enabled:\n            update_control = " · u check"\n        else:\n            update_control = ""\n        if width >= 108:\n            controls = "↑↓/Pg scroll · [/] update · f newest · p pause · c clear" + update_control + " · q quit · ? help"\n        else:\n            controls = "↑↓/Pg · [/] update · f newest · p pause · c clear" + update_control + " · q quit · ? help"\n'''
+          assert old_controls in text
+          text = text.replace(old_controls, new_controls, 1)
+          text = text.replace('            "  u           confirm/install an available release update",', '            "  u           check for updates / install an available release",', 1)
+
+          start = text.index('    def _update_modal_lines(self, width: int, body_height: int) -> List[str]:')
+          end = text.index('\n    def render(self) -> None:', start)
+          modal = '''    def _panel_lines(\n        self, title: str, content: Sequence[str], width: int, body_height: int\n    ) -> List[str]:\n        """Render a centered bordered panel inside the terminal viewport."""\n        if width < 34:\n            return [clip_ansi(line, width) for line in content[:body_height]]\n        panel_width = min(88, max(34, width - 6))\n        inner_width = panel_width - 4\n        rendered: List[str] = []\n        for line in content:\n            rendered.extend(wrap_ansi(line, inner_width) if line else [""])\n        limit = max(1, body_height - 2)\n        if len(rendered) > limit:\n            rendered = rendered[: limit - 1] + [paint("… more release notes omitted", DIM, self.color)]\n        label = f" {title} "\n        dashes = max(0, panel_width - 2 - len(label))\n        top = "╭" + "─" * (dashes // 2) + label + "─" * (dashes - dashes // 2) + "╮"\n        bottom = "╰" + "─" * (panel_width - 2) + "╯"\n        if self.color:\n            top = paint(top, BOLD_LIGHT_CYAN, True)\n            bottom = paint(bottom, BOLD_LIGHT_CYAN, True)\n        panel = [top]\n        for line in rendered:\n            padded = line + " " * max(0, inner_width - len(strip_ansi(line)))\n            panel.append(f"{paint('│', CYAN, self.color)} {padded} {paint('│', CYAN, self.color)}")\n        panel.append(bottom)\n        indent = " " * max(0, (width - panel_width) // 2)\n        panel = [indent + line for line in panel]\n        return ([""] * max(0, (body_height - len(panel)) // 2) + panel)[:body_height]\n\n    def _update_modal_lines(self, width: int, body_height: int) -> List[str]:\n        release = self.update_release\n        if release is None:\n            return self._panel_lines("Update", ["No update is currently available.", "", "Press u to check GitHub again."], width, body_height)\n        if self.update_installing:\n            return self._panel_lines(\n                "Installing update",\n                [\n                    paint(f"htail {HTAIL_VERSION}  →  {release.version}", BOLD, self.color),\n                    "", "Downloading release…", "Verifying SHA-256 checksum…",\n                    "Replacing the executable atomically…", "",\n                    "The current file will reopen automatically.",\n                ],\n                width, body_height,\n            )\n        features, fixes, other = release_note_sections(release.notes)\n        content: List[str] = [\n            paint(f"htail {HTAIL_VERSION}  →  {release.version}", BOLD, self.color),\n            paint(self.update_service.repo if self.update_service else "", DIM, self.color),\n            "",\n        ]\n        if features:\n            content.append(paint("New features", BOLD_LIGHT_CYAN, self.color))\n            content.extend(f"• {item}" for item in features[:4])\n            content.append("")\n        if fixes:\n            content.append(paint("Bug fixes", BOLD_YELLOW, self.color))\n            content.extend(f"• {item}" for item in fixes[:4])\n            content.append("")\n        if not features and not fixes:\n            content.append(paint("Release notes", BOLD_LIGHT_CYAN, self.color))\n            content.extend(f"• {item}" for item in other[:5])\n            if not other:\n                content.append("No categorized release notes were provided.")\n            content.append("")\n        content.extend([\n            "A .bak copy of the current executable will be kept.",\n            f"After updating, htail will reopen {self.path.name}.",\n            "",\n            paint("[Y] Update now", BOLD + GREEN, self.color) + "    " + paint("[N] Cancel", BOLD, self.color),\n        ])\n        return self._panel_lines("Update available", content, width, body_height)\n'''
+          text = text[:start] + modal + text[end:]
+
+          old_render = '''        width, height = self.dimensions()\n        footer_height = self.footer_height(width)\n        body_height = max(1, height - footer_height)\n        self._ensure_layout(width)\n        self.top = min(max(0, self.top), self.max_scroll_top())\n\n        sys.stdout.write(CURSOR_HOME)\n        modal_lines = self._update_modal_lines(width, body_height) if self.update_confirm_active else None\n        help_lines = self._help_lines(width, body_height) if self.help_active and modal_lines is None else None\n'''
+          new_render = '''        terminal_width, height = self.dimensions()\n        width = max(1, terminal_width - 1)\n        footer_height = self.footer_height(terminal_width)\n        body_height = max(1, height - footer_height)\n        self._ensure_layout(width)\n        self.top = min(max(0, self.top), self.max_scroll_top())\n\n        sys.stdout.write(CURSOR_HOME)\n        modal_lines = self._update_modal_lines(width, body_height) if self.update_confirm_active else None\n        help_lines = self._help_lines(width, body_height) if self.help_active and modal_lines is None else None\n'''
+          assert old_render in text
+          text = text.replace(old_render, new_render, 1)
+          path.write_text(text, encoding='utf-8')
           PY
-          patch --dry-run -p1 < /tmp/update.patch
-          patch -p1 < /tmp/update.patch
 
       - name: Add release notes and regression tests
         shell: bash
@@ -53,8 +95,7 @@ jobs:
           import unittest
 
           ROOT = Path(__file__).resolve().parents[1]
-          SCRIPT = ROOT / "htail"
-          loader = importlib.machinery.SourceFileLoader("htail_ui_test_module", str(SCRIPT))
+          loader = importlib.machinery.SourceFileLoader("htail_ui_test_module", str(ROOT / "htail"))
           spec = importlib.util.spec_from_loader(loader.name, loader)
           htail = importlib.util.module_from_spec(spec)
           sys.modules[spec.name] = htail
@@ -62,51 +103,25 @@ jobs:
 
           class UIRegressionTests(unittest.TestCase):
               def make_ui(self, service=None):
-                  return htail.TerminalUI(
-                      Path("example.md"),
-                      htail.SyntaxHighlighter(Path("example.md"), "none", False),
-                      htail.DisplayFilter(),
-                      False,
-                      300,
-                      update_service=service,
-                  )
+                  return htail.TerminalUI(Path("example.md"), htail.SyntaxHighlighter(Path("example.md"), "none", False), htail.DisplayFilter(), False, 300, update_service=service)
 
               def test_content_width_reserves_last_terminal_column(self):
-                  ui = self.make_ui()
-                  ui.dimensions = lambda: (120, 30)
+                  ui = self.make_ui(); ui.dimensions = lambda: (120, 30)
                   self.assertEqual(ui.content_width(), 119)
 
               def test_release_notes_are_categorized(self):
-                  features, fixes, other = htail.release_note_sections(
-                      "## New features\n- Better modal\n\n## Bug fixes\n- Footer fix\n"
-                  )
-                  self.assertEqual(features, ["Better modal"])
-                  self.assertEqual(fixes, ["Footer fix"])
-                  self.assertEqual(other, [])
+                  features, fixes, other = htail.release_note_sections("## New features\n- Better modal\n\n## Bug fixes\n- Footer fix\n")
+                  self.assertEqual(features, ["Better modal"]); self.assertEqual(fixes, ["Footer fix"]); self.assertEqual(other, [])
 
               def test_update_panel_contains_categories_and_actions(self):
-                  service = htail.UpdateService("example/repo")
-                  ui = self.make_ui(service)
-                  ui.update_release = htail.ReleaseInfo(
-                      version="0.7.4", tag="v0.7.4", asset_url="x",
-                      asset_name="htail", checksum_url="y",
-                      notes="## New features\n- Better modal\n\n## Bug fixes\n- Footer fix\n",
-                  )
-                  visible = "\n".join(
-                      htail.strip_ansi(x) for x in ui._update_modal_lines(90, 25)
-                  )
-                  self.assertIn("New features", visible)
-                  self.assertIn("Bug fixes", visible)
-                  self.assertIn("[Y] Update now", visible)
+                  ui = self.make_ui(htail.UpdateService("example/repo"))
+                  ui.update_release = htail.ReleaseInfo(version="0.7.4", tag="v0.7.4", asset_url="x", asset_name="htail", checksum_url="y", notes="## New features\n- Better modal\n\n## Bug fixes\n- Footer fix\n")
+                  visible = "\n".join(htail.strip_ansi(x) for x in ui._update_modal_lines(90, 25))
+                  self.assertIn("New features", visible); self.assertIn("Bug fixes", visible); self.assertIn("[Y] Update now", visible)
 
               def test_footer_advertises_manual_update_check(self):
-                  ui = self.make_ui(htail.UpdateService("example/repo"))
-                  ui.dimensions = lambda: (120, 30)
-                  status = "\n".join(ui._status_lines(119, 28))
-                  self.assertIn("u check", status)
-
-          if __name__ == "__main__":
-              unittest.main()
+                  ui = self.make_ui(htail.UpdateService("example/repo")); ui.dimensions = lambda: (120, 30)
+                  self.assertIn("u check", "\n".join(ui._status_lines(119, 28)))
           PY
 
       - name: Run tests
