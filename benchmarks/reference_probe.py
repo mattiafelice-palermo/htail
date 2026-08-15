@@ -15,6 +15,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import re
 from types import SimpleNamespace
 
 
@@ -34,6 +35,48 @@ def _args(**overrides):
 def _plain(core, rows):
     return [core.strip_ansi(row) for row in rows]
 
+
+
+def emulate_terminal(output: str, width: int, height: int):
+    """Small emulator for the CSI subset htail emits during redraws."""
+    screen = [[" "] * width for _ in range(height)]
+    row = col = 0
+    i = 0
+    while i < len(output):
+        if output[i] == "\x1b" and i + 1 < len(output) and output[i + 1] == "[":
+            j = i + 2
+            while j < len(output) and not ("@" <= output[j] <= "~"):
+                j += 1
+            if j >= len(output):
+                break
+            params = output[i + 2 : j]
+            command = output[j]
+            if command == "H":
+                fields = params.split(";") if params else []
+                row = max(0, (int(fields[0]) if fields and fields[0].isdigit() else 1) - 1)
+                col = max(0, (int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else 1) - 1)
+            elif command == "J" and params in ("2", "", "0"):
+                screen = [[" "] * width for _ in range(height)]
+            elif command == "K":
+                if 0 <= row < height:
+                    start = min(max(0, col), width)
+                    for x in range(start, width):
+                        screen[row][x] = " "
+            # SGR and private-mode cursor/mouse controls have no visible glyph.
+            i = j + 1
+            continue
+        ch = output[i]
+        if ch == "\n":
+            row = min(height - 1, row + 1)
+            col = 0
+        elif ch == "\r":
+            col = 0
+        else:
+            if 0 <= row < height and 0 <= col < width:
+                screen[row][col] = ch
+            col += 1
+        i += 1
+    return ["".join(line) for line in screen]
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -149,20 +192,30 @@ def main() -> int:
         try:
             sys.stdout = capture
             application.render()
-            capture.seek(0)
-            capture.truncate(0)
+            first_end = capture.tell()
             application.set_message("reference-status-change", 10.0)
             start = time.perf_counter()
             application.render()
             elapsed = time.perf_counter() - start
-            output = capture.getvalue().encode("utf-8")
+            status_end = capture.tell()
+            incremental_output = capture.getvalue()[first_end:status_end].encode("utf-8")
+            # Exercise a body-changing redraw too. The optimized terminal
+            # command stream may differ, but after applying it to the previous
+            # frame the content area must be character-for-character equal to
+            # v0.9.0. Footer text is excluded because 0.10.0 intentionally
+            # adds new controls/version text there.
+            application.active_pane().scroll("UP", 5)
+            application.dirty = True
+            application.render()
+            combined_output = capture.getvalue()
         finally:
             sys.stdout = old_stdout
             close = getattr(application, "close_native_watch", None)
             if close is not None:
                 close()
+        behavior["final_terminal_body"] = emulate_terminal(combined_output, 120, 40)[:-2]
         performance["status_redraw_ms"] = elapsed * 1000.0
-        performance["status_redraw_bytes"] = len(output)
+        performance["status_redraw_bytes"] = len(incremental_output)
 
     print(json.dumps({"behavior": behavior, "performance": performance}, sort_keys=True))
     return 0

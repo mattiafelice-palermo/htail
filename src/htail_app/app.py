@@ -355,6 +355,16 @@ class MultiApp:
             self.native_watch.add_directory(tracker.root)
             self.paths.extend(tracker.scan())
 
+        deduped_paths: List[Path] = []
+        initial_seen = set()
+        for path in self.paths:
+            key = ("stdin",) if str(path) == "-" else ("file", os.path.abspath(os.fspath(path)))
+            if key in initial_seen:
+                continue
+            initial_seen.add(key)
+            deduped_paths.append(path)
+        self.paths = deduped_paths
+
         self.followers: List[object] = []
         self.panes: List[Pane] = []
         self.stream = StreamPane(color, args.idle_warn)
@@ -1233,9 +1243,33 @@ def _render_stream_event(index: int, pane: Pane, result: WatchUpdate, args: argp
 def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter) -> int:
     if args.lines is None:
         args.lines = 50
+
+    glob_trackers = [
+        DynamicGlob(str(path))
+        for path in args.files
+        if str(path) != "-" and has_magic(str(path))
+    ]
+    glob_trackers.extend(DynamicGlob(pattern) for pattern in args.globs)
+    initial_paths = [
+        path for path in args.files
+        if str(path) == "-" or not has_magic(str(path))
+    ]
+    for tracker in glob_trackers:
+        initial_paths.extend(tracker.scan())
+
     panes: List[Pane] = []
     followers: List[object] = []
-    for path in args.files:
+    known_paths = set()
+
+    def add_file_source(path: Path) -> bool:
+        if str(path) == "-":
+            key = ("stdin",)
+        else:
+            key = ("file", os.path.abspath(os.fspath(path)))
+        if key in known_paths:
+            return False
+        known_paths.add(key)
+
         if str(path) == "-":
             pseudo = Path("stdin.txt")
             highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
@@ -1246,7 +1280,8 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
             pane = Pane(path, highlighter, display_filter, color, args.idle_warn)
             follower = FileFollower(path, args)
         notice = follower.initialize_if_available()
-        panes.append(pane); followers.append(follower)
+        panes.append(pane)
+        followers.append(follower)
         if notice and notice.initial_tail is not None:
             if not args.no_start_banner:
                 print(f"[htail {VERSION}] [{len(panes)}] watching {pane.name} · syntax: {highlighter.syntax_name}")
@@ -1255,28 +1290,43 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
                 print(line)
         elif not args.no_start_banner:
             print(f"[htail] [{len(panes)}] waiting for {pane.name}", file=sys.stderr)
+        return True
+
+    for path in initial_paths:
+        add_file_source(path)
+
     for command_index, command in enumerate(args.commands, start=1):
         pseudo = Path(f"command-{command_index}.log")
         highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
         pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=f"$ {command}")
         follower = CommandFollower(command, args, label=pane.name)
         follower.initialize_if_available()
-        panes.append(pane); followers.append(follower)
+        panes.append(pane)
+        followers.append(follower)
         if not args.no_start_banner:
             print(f"[htail {VERSION}] [{len(panes)}] running {command} (pid {follower.process.pid})")
+
+    next_glob_scan = 0.0
     try:
         while True:
             time.sleep(args.interval)
             now = time.monotonic()
             if args.pid is not None and not _process_alive(args.pid):
                 return 0
-            for index, follower in enumerate(followers):
+
+            if glob_trackers and now >= next_glob_scan:
+                next_glob_scan = now + 2.0
+                for tracker in glob_trackers:
+                    for path in tracker.scan():
+                        add_file_source(path)
+
+            for index, follower in list(enumerate(followers)):
                 result = follower.poll(now)
                 if isinstance(result, WatchUpdate):
                     _render_stream_event(index, panes[index], result, args, display_filter, color)
                 elif isinstance(result, WatchNotice) and result.kind == "error":
                     print(f"[htail] [{index + 1}] {result.text}", file=sys.stderr)
-            if followers and all(bool(getattr(follower, "finished", False)) for follower in followers):
+            if followers and not glob_trackers and all(bool(getattr(follower, "finished", False)) for follower in followers):
                 return 0
     except KeyboardInterrupt:
         return 0

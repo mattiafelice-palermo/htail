@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import io
 import os
 import re
 import tempfile
@@ -127,6 +128,40 @@ class GlobTests(unittest.TestCase):
                 self.assertEqual(application.panes[0].snapshot_raw, ["hello\n"])
             finally:
                 application.close_native_watch()
+
+    def test_overlapping_initial_globs_do_not_duplicate_panes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "one.log"
+            target.write_text("x\n", encoding="utf-8")
+            args = app.parse_args([
+                "--glob", str(root / "*.log"),
+                "--glob", str(root / "one.*"),
+                "--no-native-watch", "--no-color",
+            ])
+            application = MultiApp(args, False, core.DisplayFilter(), core.UpdateService(""))
+            try:
+                self.assertEqual([pane.name for pane in application.panes], ["one.log"])
+            finally:
+                application.close_native_watch()
+
+    def test_noninteractive_glob_includes_existing_match(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "one.log"
+            target.write_text("hello from glob\n", encoding="utf-8")
+            args = app.parse_args(["--glob", str(root / "*.log"), "--no-start-banner", "--no-color"])
+            # Avoid entering the follow loop: a pid known to be absent exits at
+            # its first iteration, after initial glob content has been printed.
+            args.pid = 999999999
+            out = io.StringIO()
+            old_stdout = app.sys.stdout
+            try:
+                app.sys.stdout = out
+                app.run_noninteractive(args, False, core.DisplayFilter())
+            finally:
+                app.sys.stdout = old_stdout
+            self.assertIn("hello from glob", out.getvalue())
 
 
 class RegexInteractionTests(unittest.TestCase):
