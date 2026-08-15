@@ -19,7 +19,7 @@ jobs:
       - name: Assemble executable
         shell: bash
         run: |
-          cat bootstrap/htail.b64.* | tr -d '\n\r' | base64 -d > htail
+          cat bootstrap/htail.gz.b64.* | tr -d '\n\r' | base64 -d | gzip -d > htail
           chmod +x htail
           python -m py_compile htail
           python -m unittest discover -s tests -v
