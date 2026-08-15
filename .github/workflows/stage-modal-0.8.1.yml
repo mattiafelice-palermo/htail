@@ -45,6 +45,11 @@ jobs:
               '    for line in content:\n        rendered.extend(core.wrap_ansi(line, inner_width) if line else [""])\n    if not color:\n        rendered = [core.strip_ansi(row) for row in rendered]\n    limit = max(1, height - 4)\n',
               1,
           )
+          text = text.replace(
+              '    for i, row in enumerate(panel_rows[:height]):\n        y = top_y + i\n        if 0 <= y < height:\n            out[y] = (" " * left) + row + (" " * max(0, width - left - len(core.strip_ansi(row))))\n    return out\n',
+              '    for i, row in enumerate(panel_rows[:height]):\n        y = top_y + i\n        if 0 <= y < height:\n            out[y] = (" " * left) + row + (" " * max(0, width - left - len(core.strip_ansi(row))))\n    if not color:\n        out = [core.strip_ansi(row) for row in out]\n    return out\n',
+              1,
+          )
           app.write_text(text, encoding='utf-8')
 
           bundle = Path('tests/test_bundle.py')
