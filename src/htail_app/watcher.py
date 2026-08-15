@@ -1,12 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import codecs
 import difflib
 from pathlib import Path
 import time
 from typing import List, Optional, Sequence, Tuple
 
 from . import core
+
+
+ACTIVE_CONTENT_VERIFY_INTERVAL = 0.50
+
+
+@dataclass
+class DiffAnalysis:
+    events: Sequence[Tuple[str, List[str]]]
+    added: int
+    replaced: int
+    deleted: int
+    changed_new_indices: Sequence[int]
+    unchanged_prefix: int
+    unchanged_suffix: int
 
 
 @dataclass
@@ -24,17 +39,18 @@ class WatchUpdate:
 
 @dataclass
 class WatchNotice:
-    kind: str  # initial, missing, resumed, error
+    kind: str  # initial, missing, resumed, ended, error
     text: str = ""
     initial_tail: Optional[List[str]] = None
 
 
-def _changed_new_indices(old: Sequence[str], new: Sequence[str]) -> List[int]:
-    """Return current-snapshot row indexes that were added or replaced.
+def analyze_changes(old: Sequence[str], new: Sequence[str]) -> DiffAnalysis:
+    """Compute htail's diff events and current-row change indexes in one pass.
 
-    This mirrors core.compute_changes()'s position-anchored diff semantics so
-    repetitive coordination files do not align a fresh tail with older blocks.
-    Deletions have no row in the new snapshot and therefore no gutter index.
+    Older htail versions independently ran the position-anchored diff and then
+    repeated the same prefix/suffix/SequenceMatcher work to discover which
+    rows needed the cyan current-snapshot gutter. This routine produces both
+    outputs from one structural analysis.
     """
     old_keys = [core._line_identity(line) for line in old]
     new_keys = [core._line_identity(line) for line in new]
@@ -45,7 +61,17 @@ def _changed_new_indices(old: Sequence[str], new: Sequence[str]) -> List[int]:
         prefix += 1
 
     if prefix == len(old) and len(new) >= len(old):
-        return list(range(prefix, len(new)))
+        appended = list(new[prefix:])
+        events = [("add", appended)] if appended else []
+        return DiffAnalysis(
+            events=events,
+            added=len(appended),
+            replaced=0,
+            deleted=0,
+            changed_new_indices=tuple(range(prefix, len(new))),
+            unchanged_prefix=prefix,
+            unchanged_suffix=0,
+        )
 
     suffix = 0
     suffix_limit = min(len(old) - prefix, len(new) - prefix)
@@ -57,23 +83,81 @@ def _changed_new_indices(old: Sequence[str], new: Sequence[str]) -> List[int]:
 
     old_end = len(old) - suffix if suffix else len(old)
     new_end = len(new) - suffix if suffix else len(new)
-    if suffix == 0:
-        return list(range(prefix, new_end))
+    old_mid = list(old[prefix:old_end])
+    new_mid = list(new[prefix:new_end])
+    old_mid_keys = old_keys[prefix:old_end]
+    new_mid_keys = new_keys[prefix:new_end]
 
-    matcher = difflib.SequenceMatcher(
-        a=old_keys[prefix:old_end],
-        b=new_keys[prefix:new_end],
-        autojunk=False,
-    )
+    if suffix == 0:
+        events: List[Tuple[str, List[str]]] = []
+        deleted = len(old_mid)
+        if old_mid:
+            events.append(("delete", old_mid))
+        if new_mid:
+            if old_mid:
+                events.append(("replace", new_mid))
+                return DiffAnalysis(
+                    events, 0, len(new_mid), deleted,
+                    tuple(range(prefix, new_end)), prefix, 0,
+                )
+            events.append(("add", new_mid))
+            return DiffAnalysis(
+                events, len(new_mid), 0, 0,
+                tuple(range(prefix, new_end)), prefix, 0,
+            )
+        return DiffAnalysis(events, 0, 0, deleted, (), prefix, 0)
+
+    matcher = difflib.SequenceMatcher(a=old_mid_keys, b=new_mid_keys, autojunk=False)
+    events: List[Tuple[str, List[str]]] = []
     changed: List[int] = []
-    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
-        if tag in ("insert", "replace"):
-            changed.extend(range(prefix + j1, prefix + j2))
-    return changed
+    added = replaced = deleted = 0
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "insert":
+            lines = new_mid[j1:j2]
+            if lines:
+                events.append(("add", lines))
+                added += len(lines)
+                changed.extend(range(prefix + j1, prefix + j2))
+        elif tag == "delete":
+            lines = old_mid[i1:i2]
+            if lines:
+                events.append(("delete", lines))
+                deleted += len(lines)
+        elif tag == "replace":
+            old_lines = old_mid[i1:i2]
+            new_lines = new_mid[j1:j2]
+            if old_lines:
+                events.append(("delete", old_lines))
+                deleted += len(old_lines)
+            if new_lines:
+                events.append(("replace", new_lines))
+                replaced += len(new_lines)
+                changed.extend(range(prefix + j1, prefix + j2))
+
+    return DiffAnalysis(events, added, replaced, deleted, tuple(changed), prefix, suffix)
+
+
+def _chunk_decode_safe(encoding: str) -> bool:
+    """Whether independently decoding newly appended bytes is safe enough.
+
+    Stateful/BOM-dependent encodings fall back to the verified full snapshot
+    path. UTF-8 and common single-byte encodings use the fast path.
+    """
+    try:
+        name = codecs.lookup(encoding).name.lower().replace('_', '-')
+    except LookupError:
+        return False
+    blocked = ('utf-16', 'utf-32', 'utf-7', 'iso2022', 'hz')
+    return not any(name.startswith(prefix) for prefix in blocked)
 
 
 class FileFollower:
     """Non-blocking polling state machine for one watched file."""
+
+    finished = False
 
     def __init__(self, path: Path, args) -> None:
         self.path = path
@@ -89,6 +173,10 @@ class FileFollower:
         self._pending_signature = None
         self._pending_started: Optional[float] = None
         self._pending_last_change: Optional[float] = None
+        self.fast_append_hits = 0
+
+    def close(self) -> None:
+        return
 
     def _reset_pending(self) -> None:
         self._pending_signature = None
@@ -118,6 +206,99 @@ class FileFollower:
         self.file_missing = False
         return WatchNotice("resumed" if resumed else "initial", initial_tail=initial_tail)
 
+    def _make_update(self, analysis: DiffAnalysis, now: float) -> Optional[WatchUpdate]:
+        if not analysis.events:
+            return None
+        elapsed = None if self.last_update_time is None else now - self.last_update_time
+        self.update_number += 1
+        self.last_update_time = now
+        self.active_verify_until = max(self.active_verify_until, now + core.ACTIVE_VERIFY_WINDOW)
+        return WatchUpdate(
+            update_number=self.update_number,
+            events=analysis.events,
+            added=analysis.added,
+            replaced=analysis.replaced,
+            deleted=analysis.deleted,
+            elapsed=elapsed,
+            now_monotonic=now,
+            current_snapshot=self.previous,
+            changed_new_indices=analysis.changed_new_indices,
+        )
+
+    def _try_fast_append(self, current_signature, now: float) -> Tuple[bool, Optional[WatchUpdate]]:
+        """Consume a pure same-file append without rereading the old prefix."""
+        if self.signature is None or current_signature is None:
+            return False, None
+        if not _chunk_decode_safe(self.args.encoding):
+            return False, None
+        _old_mtime, old_size, old_inode = self.signature
+        _new_mtime, new_size, new_inode = current_signature
+        if old_inode != new_inode or new_size <= old_size:
+            return False, None
+
+        try:
+            with self.path.open('rb') as handle:
+                handle.seek(old_size)
+                payload = handle.read()
+            after = core.file_signature(self.path)
+        except OSError:
+            return False, None
+        if after != current_signature or not payload:
+            return False, None
+
+        try:
+            text = payload.decode(self.args.encoding, errors='replace')
+        except (LookupError, UnicodeError):
+            return False, None
+        appended = text.splitlines(keepends=True)
+        if not appended:
+            return False, None
+
+        old_len = len(self.previous)
+        if self.previous and not self.previous[-1].endswith(('\n', '\r')):
+            old_last = self.previous[-1]
+            combined = old_last + appended[0]
+            rest = appended[1:]
+            self.previous[-1] = combined
+            self.previous.extend(rest)
+            if core._line_identity(combined) == core._line_identity(old_last):
+                analysis = DiffAnalysis(
+                    events=(("add", list(rest)),) if rest else (),
+                    added=len(rest),
+                    replaced=0,
+                    deleted=0,
+                    changed_new_indices=tuple(range(old_len, len(self.previous))),
+                    unchanged_prefix=old_len,
+                    unchanged_suffix=0,
+                )
+            else:
+                replacement = [combined, *rest]
+                analysis = DiffAnalysis(
+                    events=(("delete", [old_last]), ("replace", replacement)),
+                    added=0,
+                    replaced=len(replacement),
+                    deleted=1,
+                    changed_new_indices=tuple(range(old_len - 1, len(self.previous))),
+                    unchanged_prefix=max(0, old_len - 1),
+                    unchanged_suffix=0,
+                )
+        else:
+            self.previous.extend(appended)
+            analysis = DiffAnalysis(
+                events=(("add", list(appended)),),
+                added=len(appended),
+                replaced=0,
+                deleted=0,
+                changed_new_indices=tuple(range(old_len, len(self.previous))),
+                unchanged_prefix=old_len,
+                unchanged_suffix=0,
+            )
+
+        self.signature = current_signature
+        self.last_content_verify = now
+        self.fast_append_hits += 1
+        return True, self._make_update(analysis, now)
+
     def poll(self, now: Optional[float] = None):
         """Return a WatchUpdate/WatchNotice when state changes, otherwise None."""
         now = time.monotonic() if now is None else now
@@ -135,7 +316,10 @@ class FileFollower:
             self.args.verify_interval > 0
             and now - self.last_content_verify >= self.args.verify_interval
         )
-        active_verify_due = now <= self.active_verify_until
+        active_verify_due = (
+            now <= self.active_verify_until
+            and now - self.last_content_verify >= ACTIVE_CONTENT_VERIFY_INTERVAL
+        )
         verify_due = periodic_verify_due or active_verify_due
 
         if current_signature is None:
@@ -149,8 +333,6 @@ class FileFollower:
 
         was_missing = self.file_missing
         if self.file_missing:
-            # Keep the old snapshot so the return can be diffed against the last
-            # known content rather than losing changes made while absent.
             self.file_missing = False
             self.signature = None
             self._reset_pending()
@@ -175,6 +357,10 @@ class FileFollower:
                 return None
             stable_signature = current_signature
             self._reset_pending()
+
+            handled, fast = self._try_fast_append(stable_signature, now)
+            if handled:
+                return fast
         else:
             stable_signature = current_signature
             self._reset_pending()
@@ -193,28 +379,13 @@ class FileFollower:
         if verified_signature is not None:
             stable_signature = verified_signature
         self.last_content_verify = now
-        events, added, replaced, deleted = core.compute_changes(self.previous, current)
-        changed_new_indices = _changed_new_indices(self.previous, current)
+        analysis = analyze_changes(self.previous, current)
         self.previous = current
         self.signature = stable_signature
 
-        if not events:
-            if was_missing:
-                return WatchNotice("resumed", f"resumed {self.path}")
-            return None
-
-        elapsed = None if self.last_update_time is None else now - self.last_update_time
-        self.update_number += 1
-        self.last_update_time = now
-        self.active_verify_until = max(self.active_verify_until, now + core.ACTIVE_VERIFY_WINDOW)
-        return WatchUpdate(
-            update_number=self.update_number,
-            events=events,
-            added=added,
-            replaced=replaced,
-            deleted=deleted,
-            elapsed=elapsed,
-            now_monotonic=now,
-            current_snapshot=current,
-            changed_new_indices=changed_new_indices,
-        )
+        update = self._make_update(analysis, now)
+        if update is not None:
+            return update
+        if was_missing:
+            return WatchNotice("resumed", f"resumed {self.path}")
+        return None
