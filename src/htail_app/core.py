@@ -67,7 +67,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Pattern, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Pattern, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -1145,8 +1145,17 @@ class UpdateService:
             notes=notes,
         )
 
-    def install(self, release: ReleaseInfo, target: Path) -> Tuple[bool, str]:
-        """Download, validate and atomically replace the running script."""
+    def install(
+        self,
+        release: ReleaseInfo,
+        target: Path,
+        progress: Optional[Callable[[str, Optional[int], Optional[int]], None]] = None,
+    ) -> Tuple[bool, str]:
+        """Download, validate and atomically replace the running script.
+
+        ``progress`` receives ``(stage, current_bytes, total_bytes)``. Byte
+        counts are supplied while downloading; later stages use ``None``.
+        """
         target = target.resolve()
         target_dir = target.parent
         if not target.exists():
@@ -1154,21 +1163,48 @@ class UpdateService:
         if not os.access(target, os.W_OK):
             return False, f"running script is not writable: {target}"
 
+        def report(stage: str, current: Optional[int] = None, total: Optional[int] = None) -> None:
+            if progress is None:
+                return
+            try:
+                progress(stage, current, total)
+            except Exception:
+                pass
+
         temp_path: Optional[Path] = None
         try:
-            request = urllib.request.Request(
-                release.asset_url,
-                headers={"User-Agent": f"htail/{HTAIL_VERSION}"},
-            )
+            request = urllib.request.Request(release.asset_url, headers={"User-Agent": f"htail/{HTAIL_VERSION}"})
             with urllib.request.urlopen(request, timeout=15.0) as response:
-                content = response.read()
+                headers = getattr(response, "headers", {})
+                size = headers.get("Content-Length") if hasattr(headers, "get") else None
+                total = int(size) if size and size.isdigit() else None
+                chunks: List[bytes] = []
+                current = 0
+                report("Downloading release…", current, total)
+                while True:
+                    try:
+                        chunk = response.read(65536)
+                    except TypeError:
+                        # Simple test doubles and a few file-like adapters only
+                        # implement read() without a size argument. Real HTTP
+                        # responses still take the streaming path above.
+                        chunk = response.read()
+                        if chunk:
+                            chunks.append(chunk)
+                            current += len(chunk)
+                            report("Downloading release…", current, total)
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    current += len(chunk)
+                    report("Downloading release…", current, total)
+                content = b"".join(chunks)
 
+            report("Verifying SHA-256 checksum…")
             expected_sha256: Optional[str] = None
             if release.checksum_url:
-                checksum_request = urllib.request.Request(
-                    release.checksum_url,
-                    headers={"User-Agent": f"htail/{HTAIL_VERSION}"},
-                )
+                checksum_request = urllib.request.Request(release.checksum_url, headers={"User-Agent": f"htail/{HTAIL_VERSION}"})
                 with urllib.request.urlopen(checksum_request, timeout=10.0) as response:
                     checksum_text = response.read().decode("utf-8", errors="replace")
                 checksum_match = re.search(r"\b([0-9a-fA-F]{64})\b", checksum_text)
@@ -1184,39 +1220,31 @@ class UpdateService:
                 source = content.decode("utf-8")
             except UnicodeDecodeError as exc:
                 return False, f"downloaded update is not UTF-8 text: {exc}"
-
             if not source.startswith("#!/"):
                 return False, "downloaded update does not look like an executable htail script"
             if f'HTAIL_VERSION = "{release.version}"' not in source:
-                return False, (
-                    f"downloaded script does not identify itself as version {release.version}"
-                )
+                return False, f"downloaded script does not identify itself as version {release.version}"
             try:
                 compile(source, str(target), "exec")
             except SyntaxError as exc:
                 return False, f"downloaded update failed syntax validation: {exc}"
 
-            fd, temp_name = tempfile.mkstemp(
-                prefix=f".{target.name}.update-",
-                dir=str(target_dir),
-            )
+            report("Preparing update…")
+            fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.update-", dir=str(target_dir))
             temp_path = Path(temp_name)
             with os.fdopen(fd, "wb") as handle:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
+            os.chmod(temp_path, target.stat().st_mode)
 
-            mode = target.stat().st_mode
-            os.chmod(temp_path, mode)
-
+            report("Backing up current executable…")
             backup = target.with_name(target.name + ".bak")
             shutil.copy2(target, backup)
+            report("Installing update…")
             os.replace(temp_path, target)
             temp_path = None
-            return True, (
-                f"updated {target.name} {HTAIL_VERSION} → {release.version}"
-                + (" (SHA-256 verified)" if expected_sha256 else "")
-            )
+            return True, f"updated {target.name} {HTAIL_VERSION} → {release.version}" + (" (SHA-256 verified)" if expected_sha256 else "")
         except urllib.error.URLError as exc:
             return False, f"update download failed: {exc.reason}"
         except OSError as exc:

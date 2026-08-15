@@ -101,7 +101,13 @@ class FileFollower:
         if not self.path.exists():
             return None
         try:
-            previous, initial_tail = core.read_initial_tail(self.path, self.args.lines, self.args.encoding)
+            previous = core.read_lines(self.path, self.args.encoding)
+            if self.args.lines is None:
+                initial_tail = list(previous)
+            elif self.args.lines == 0:
+                initial_tail = []
+            else:
+                initial_tail = list(previous[-self.args.lines:])
         except OSError as exc:
             return WatchNotice("error", f"cannot read {self.path}: {exc}")
         self.previous = previous

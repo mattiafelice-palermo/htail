@@ -37,7 +37,7 @@ ht --layout grid *.log
 ht --layout stream reviewer.md implementer.md
 ```
 
-`-n` controls **only the initial context per file**. Once htail is running, every observed change is retained.
+Interactive htail reads the **full current file** and initially positions each pane at EOF: if the file fits, the whole file is visible; otherwise the pane shows the final screenful after wrapping. `-n` is retained only for non-interactive tail-like output.
 
 ### Multi-file layouts
 
@@ -89,7 +89,7 @@ A new update moves **only its own pane** to the beginning of that update. Other 
 
 htail checks GitHub on startup and once per hour during long sessions. Press `u` to force an immediate check. The in-app update panel shows release notes split into **New features** and **Bug fixes**.
 
-After confirmation htail downloads the release asset and checksum, verifies SHA-256, keeps a `.bak` copy, atomically replaces itself, and reopens **all watched files with the same command-line options**.
+After confirmation htail downloads the release asset with a progress bar, verifies SHA-256, keeps a `.bak` copy, atomically replaces itself, and reopens **all watched files with the same command-line options**. `ht --update` uses the same progress reporting.
 
 ```bash
 ht --check-update
@@ -101,7 +101,7 @@ No update is installed without confirmation.
 ## Useful options
 
 ```bash
-ht -n 0 file.md
+ht -n 20 file.md  # non-interactive initial context override
 ht --verify-interval 0.5 file.md
 ht --idle-warn 120 file.md
 ht --grep 'REVIEW|IMPLEMENTER' *.md

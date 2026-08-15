@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-self-install-prompt", action="store_true")
     parser.add_argument("--check-update", action="store_true")
     parser.add_argument("--update", action="store_true")
-    parser.add_argument("-n", "--lines", type=int, default=50, help="initial lines per file (default: 50)")
+    parser.add_argument("-n", "--lines", type=int, default=None, help="initial source-line limit for non-interactive output; interactive mode reads the full file")
     parser.add_argument("-i", "--interval", type=float, default=0.10, help="poll interval in seconds")
     parser.add_argument("--verify-interval", type=float, default=1.0)
     parser.add_argument("--debounce", type=float, default=0.15)
@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.lines < 0:
+    if args.lines is not None and args.lines < 0:
         parser.error("--lines must be >= 0")
     if args.interval <= 0:
         parser.error("--interval must be > 0")
@@ -513,19 +513,17 @@ class MultiApp:
         return _panel_lines("Update available", content, width, height, self.color)
 
     def _install_worker(self, release: core.ReleaseInfo) -> None:
-        """Install a confirmed release off the UI thread and schedule restart.
-
-        The 0.8.1/0.8.2 modal path started a thread targeting this method, but
-        the method was accidentally omitted during the MultiApp refactor.
-        Keeping installation here makes the interactive path use the same
-        validated UpdateService.install() implementation as `ht --update`.
-        """
+        """Install a confirmed release off the UI thread and schedule restart."""
         target = executable_path()
-        try:
-            self.update_install_status = "Downloading, verifying and installing update…"
-            self.update_install_progress = None
+
+        def progress(stage: str, current: Optional[int], total: Optional[int]) -> None:
+            self.update_install_status = stage
+            self.update_install_progress = None if current is None else (current, total)
             self.dirty = True
-            ok, message = self.update_service.install(release, target)
+
+        try:
+            progress("Preparing update…", None, None)
+            ok, message = self.update_service.install(release, target, progress=progress)
         except Exception as exc:
             ok, message = False, f"update failed: {exc}"
 
@@ -828,7 +826,51 @@ class MultiApp:
                 self.dirty = True
 
 
+class _CLIUpdateProgress:
+    """Compact progress reporter for ``ht --update``."""
+
+    def __init__(self, stream) -> None:
+        self.stream = stream
+        self.tty = bool(getattr(stream, "isatty", lambda: False)())
+        self.last_stage: Optional[str] = None
+        self.open_line = False
+
+    def _newline(self) -> None:
+        if self.open_line:
+            self.stream.write("\n")
+            self.open_line = False
+
+    def __call__(self, stage: str, current: Optional[int], total: Optional[int]) -> None:
+        if not self.tty:
+            if stage != self.last_stage:
+                self.stream.write(f"[htail] {stage}\n")
+                self.stream.flush()
+            self.last_stage = stage
+            return
+        if stage != self.last_stage:
+            self._newline()
+        self.last_stage = stage
+        if current is None:
+            text = f"[htail] {stage}"
+        elif total and total > 0:
+            frac = max(0.0, min(1.0, current / total))
+            filled = int(round(30 * frac))
+            bar = "█" * filled + "░" * (30 - filled)
+            text = f"[htail] [{bar}] {frac * 100:5.1f}%  {current:,}/{total:,} bytes"
+        else:
+            text = f"[htail] Downloading… {current:,} bytes"
+        self.stream.write("\r" + core.CLEAR_LINE + text)
+        self.stream.flush()
+        self.open_line = True
+
+    def finish(self) -> None:
+        self._newline()
+        self.stream.flush()
+
+
 def run_interactive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter, update_service: core.UpdateService) -> int:
+    # Interactive panes always retain the full current file; geometry decides the viewport.
+    args.lines = None
     app = MultiApp(args, color, display_filter, update_service)
     update_service.start()
     restart: Optional[core.RestartRequested] = None
@@ -882,6 +924,8 @@ def _render_stream_event(index: int, pane: Pane, result: WatchUpdate, args: argp
 
 
 def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: core.DisplayFilter) -> int:
+    if args.lines is None:
+        args.lines = 50
     panes: List[Pane] = []
     followers: List[FileFollower] = []
     for index, path in enumerate(args.files):
@@ -932,7 +976,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.check_update:
             print(f"htail {release.version} is available (current: {VERSION}).")
             return 0
-        ok, message = update_service.install(release, executable_path())
+        cli_progress = _CLIUpdateProgress(sys.stdout)
+        ok, message = update_service.install(release, executable_path(), progress=cli_progress)
+        cli_progress.finish()
         print(f"[htail] {message}", file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
 

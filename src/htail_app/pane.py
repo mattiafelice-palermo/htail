@@ -57,6 +57,7 @@ class Pane:
         self._logical_to_visual: List[int] = []
         self._visual_to_logical: List[int] = []
         self._pending_anchor_logical: Optional[int] = None
+        self._initial_bottom_pending = False
 
         # Independently retain the current verified file snapshot. History is
         # still kept in self.lines; this snapshot is used only when the whole
@@ -167,8 +168,14 @@ class Pane:
         visible = [line for line in raw_lines if self.display_filter.accepts(line)]
         self.lines.extend(core.render_initial_lines(visible, self.highlighter))
         self._mark_layout_dirty()
+        self._initial_bottom_pending = True
         self.waiting = False
         self.missing = False
+
+    def _apply_initial_bottom(self, body_height: int) -> None:
+        if self._initial_bottom_pending:
+            self.top = max(0, len(self._visual_lines) - max(0, body_height))
+            self._initial_bottom_pending = False
 
     def add_system_line(self, text: str, warning: bool = False) -> None:
         if self.lines:
@@ -308,6 +315,7 @@ class Pane:
         width = max(1, width)
         height = max(0, height)
         self._ensure_layout(width)
+        self._apply_initial_bottom(height)
         self.top = min(max(0, self.top), max(0, len(self._visual_lines) - 1))
         rows = self._visual_lines[self.top : self.top + height]
         return [_pad_ansi(row, width) for row in rows] + [" " * width] * max(0, height - len(rows))
@@ -324,7 +332,7 @@ class Pane:
                 break
         return result
 
-    def title(self, index: int, width: int, focused: bool) -> str:
+    def title(self, index: int, width: int, focused: bool, body_height: Optional[int] = None) -> str:
         now = time.monotonic()
         if self.message and now <= self.message_until:
             state = self.message
@@ -340,6 +348,13 @@ class Pane:
             parts.append(f"U{current}")
         if self.unseen_updates:
             parts.append(f"+{self.unseen_updates} NEW")
+        if body_height is not None and not self.prefer_snapshot:
+            above = min(max(0, self.top), len(self._visual_lines))
+            below = max(0, len(self._visual_lines) - (above + max(0, body_height)))
+            if above:
+                parts.append(f"↑{above}")
+            if below:
+                parts.append(f"↓{below}")
         idle = self.idle_seconds(now)
         if self.idle_warn > 0 and idle >= self.idle_warn:
             parts.append(f"⚠ {core.format_duration(idle)}")
@@ -354,9 +369,10 @@ class Pane:
 
         inner = width - 2
         body_h = height - 2
-        # Resolve pending update anchors before deriving the title/current update.
+        # Initial view follows EOF using the actual wrapped pane height.
         self._ensure_layout(inner)
-        title = self.title(index, max(1, width - 4), focused)
+        self._apply_initial_bottom(body_h)
+        title = self.title(index, max(1, width - 4), focused, body_h)
         title_plain = core.strip_ansi(title)
         title = core.clip_ansi(title, max(1, width - 4))
         visible = len(core.strip_ansi(title))

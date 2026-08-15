@@ -130,10 +130,16 @@ class InputReader:
         try:
             import select
 
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            fd = self._fd if self._fd is not None else sys.stdin.fileno()
+            ready, _, _ = select.select([fd], [], [], 0)
             if not ready:
                 return None
-            ch = sys.stdin.read(1)
+
+            def read_char() -> str:
+                data = os.read(fd, 1)
+                return data.decode("latin1") if data else ""
+
+            ch = read_char()
             if ch != "\x1b":
                 if ch == "\t":
                     return "TAB"
@@ -142,10 +148,10 @@ class InputReader:
             seq = ch
             deadline = time.monotonic() + 0.03
             while time.monotonic() < deadline and len(seq) < 48:
-                more, _, _ = select.select([sys.stdin], [], [], 0.002)
+                more, _, _ = select.select([fd], [], [], 0.002)
                 if not more:
                     break
-                seq += sys.stdin.read(1)
+                seq += read_char()
                 if seq.startswith("\x1b[<") and seq[-1:] in ("M", "m"):
                     break
                 if not seq.startswith("\x1b[<") and (seq.endswith("~") or seq in ("\x1b[A", "\x1b[B", "\x1b[H", "\x1b[F", "\x1bOH", "\x1bOF", "\x1b[Z")):
@@ -153,3 +159,4 @@ class InputReader:
             return parse_escape_sequence(seq)
         except Exception:
             return None
+
