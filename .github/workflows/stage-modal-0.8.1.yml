@@ -27,6 +27,22 @@ jobs:
         shell: bash
         run: |
           base64 -d .staging/modal081.b64 | tar xzf -
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('src/htail_app/app.py')
+          text = app.read_text(encoding='utf-8')
+          text = text.replace('core.paint(top_plain, core.BOLD_LIGHT_CYAN, True)', 'core.paint(top_plain, core.BOLD_LIGHT_CYAN, color)')
+          text = text.replace('core.paint(bottom_plain, core.BOLD_LIGHT_CYAN, True)', 'core.paint(bottom_plain, core.BOLD_LIGHT_CYAN, color)')
+          text = text.replace('core.paint(side_plain, core.CYAN, True)', 'core.paint(side_plain, core.CYAN, color)')
+          app.write_text(text, encoding='utf-8')
+
+          bundle = Path('tests/test_bundle.py')
+          text = bundle.read_text(encoding='utf-8')
+          text = text.replace('htail 0.8.0', 'htail 0.8.1')
+          text = text.replace('HTAIL_VERSION = "0.8.0"', 'HTAIL_VERSION = "0.8.1"')
+          bundle.write_text(text, encoding='utf-8')
+          PY
 
       - name: Compile
         run: python -m compileall -q src tools tests
@@ -50,7 +66,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/htail_app/app.py src/htail_app/__init__.py RELEASE_NOTES.md tests/test_modal_ui.py
+          git add src/htail_app/app.py src/htail_app/__init__.py RELEASE_NOTES.md tests/test_modal_ui.py tests/test_bundle.py
           git rm .staging/modal081.b64
           git commit -m "Add modal overlays and update progress for htail 0.8.1"
           git push origin HEAD:feature/modal-ui-0.8.1
