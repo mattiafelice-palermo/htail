@@ -21,8 +21,8 @@ jobs:
         shell: bash
         run: |
           test -f update-0.7.2.patch
-          git apply --check update-0.7.2.patch
-          git apply update-0.7.2.patch
+          patch --dry-run -p1 < update-0.7.2.patch
+          patch -p1 < update-0.7.2.patch
           rm -f update-0.7.2.patch .github/workflows/apply-update.yml
 
       - name: Run tests
