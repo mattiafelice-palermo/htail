@@ -1,13 +1,20 @@
-# htail 0.8.5
+# htail 0.9.0
 
 ## New features
 
-- Latest updates are now shown inside a scrollable full-current-file snapshot. The update marker is anchored at the first changed region and changed rows retain the cyan gutter; `[` / `]` remain the explicit controls for historical update records.
-- Pane bottom borders now show a prominent `↓N more` indicator whenever visual rows remain below the viewport, in addition to the compact title counters.
-- The in-app updater now keeps one overall progress bar visible across download, checksum verification, backup and installation, and briefly displays 100% before restarting.
+- Read standard input as a first-class source: `producer | ht` works in the interactive TUI, with controls read from the controlling terminal. `-` can also be used explicitly alongside file sources.
+- Added repeatable `--exec COMMAND` sources with merged stdout/stderr panes.
+- Added `--pid PID` to exit when a producer or companion process terminates.
+- Added `benchmarks/benchmark_htail.py` and `docs/NEXT.md` for reproducible performance checks and the deferred feature/performance backlog.
 
-## Bug fixes
+## Performance
 
-- Held-arrow scrolling is substantially more responsive because keyboard/mouse handling and terminal rendering now run at roughly 60 Hz independently of the file polling interval.
-- Scrolling is clamped at the last full viewport, so the pane can no longer move past EOF into blank space.
-- Scrolling around the latest update no longer falls back into the old initial-file plus diff-fragment history.
+- Pure same-file appends now use a byte-offset fast path instead of rereading and rediffing the complete file.
+- Full rewrites now compute diff events and changed-current-row indexes in one structural pass rather than two.
+- Panes cache safe Markdown rendering and ANSI-aware wrapping for unchanged lines across incremental updates.
+- Active post-update content verification is rate-limited while retaining the periodic verified-snapshot fallback for unusual same-metadata rewrites.
+
+## Bug fixes / safety
+
+- Piped-stdin interactive sessions no longer lose keyboard controls because input is read from `/dev/tty` on POSIX.
+- In-app self-update is blocked during `--exec` sessions to avoid unexpectedly relaunching a child command; use `ht --update` separately in that case.
