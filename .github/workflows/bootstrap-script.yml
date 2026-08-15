@@ -1,0 +1,38 @@
+name: Bootstrap htail script
+
+on:
+  push:
+    paths:
+      - "bootstrap/ready"
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assemble executable
+        shell: bash
+        run: |
+          cat bootstrap/htail.b64.* | tr -d '\n\r' | base64 -d > htail
+          chmod +x htail
+          python -m py_compile htail
+          python -m unittest discover -s tests -v
+          test "$(python htail --version)" = "htail 0.7.0"
+
+      - name: Commit executable
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add htail
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Add htail 0.7.0 executable"
+          git push origin HEAD:main
