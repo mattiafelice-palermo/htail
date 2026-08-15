@@ -1,11 +1,15 @@
-# htail 0.7.3
+# htail 0.8.0
 
 ## New features
 
-- Redesigned the in-app update confirmation as a centered terminal panel with clearer actions and version information.
-- The update panel now shows the GitHub release changelog directly inside htail, separated into New features and Bug fixes.
-- The footer now advertises `u check` even when no update is pending; pressing `u` forces an immediate GitHub release check.
+- Watch any number of files in one htail session, with independent scroll position, pause state, update history, idle state, and unseen-update counts for each file.
+- Added live `auto`, `rows`, `columns`, `grid`, and chronological `stream` layouts. Press `l` to switch layouts without restarting or losing pane state.
+- Added pane navigation with `Tab`, `Shift+Tab`, and number keys, plus `z` to maximize/restore the focused pane.
+- Added terminal mouse support: click a pane to focus it and use the mouse wheel to scroll the pane under the pointer. `--no-mouse` disables mouse tracking when preferred.
+- Refactored the application into modules under `src/htail_app/` while preserving a single-file install/update artifact through the release bundler.
+- Multi-file self-update reopens all watched files with the same CLI arguments after installation.
 
 ## Bug fixes
 
-- Fixed a terminal row-accounting bug where content could disappear underneath the two-line footer while scrolling. htail now deliberately leaves the terminal's final physical column unused, preventing implicit terminal wrapping from consuming an extra row.
+- The new bundled executable keeps self-install and self-update targeted at the real `ht` wrapper rather than the cached internal package payload.
+- Pane rendering retains the existing one-column terminal safety margin, preventing content from being overwritten by the global footer after resize or layout changes.

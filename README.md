@@ -1,122 +1,123 @@
 # htail
 
-`htail` is an interactive terminal file follower: a more readable, stateful alternative to `tail -f` for logs, Markdown coordination files, agent output, and other human-readable text.
-
-The installed command is intentionally short: **`ht`**.
+`htail` is an interactive terminal file follower: a more readable, stateful alternative to `tail -f` for logs, Markdown coordination files, agent output, and other human-readable text. The installed command is intentionally short: **`ht`**.
 
 ## Quick install
 
-Copy and run this command:
+Copy and run:
 
 ```bash
-tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/mattiafelice-palermo/htail/main/htail -o "$tmp" && chmod +x "$tmp" && "$tmp"; rm -f "$tmp"
+tmp="$(mktemp)" && curl -fL https://github.com/mattiafelice-palermo/htail/releases/latest/download/htail -o "$tmp" && chmod +x "$tmp" && "$tmp"; rm -f "$tmp"
 ```
 
-On first interactive launch, htail asks whether it may install itself as `ht` in `~/.local/bin`. If `ht` already exists in your `PATH`, it will **not overwrite it** and will offer `htail` or `hlog` instead.
-
-If `~/.local/bin` is not already in `PATH`, htail adds it to the appropriate Bash, Zsh, or Fish startup configuration when possible. A new shell may be required before `ht` is available by name.
+On first interactive launch, htail asks whether it may install itself as `ht` in `~/.local/bin`. If `ht` already exists in `PATH`, it is never overwritten; `htail` or `hlog` is proposed instead.
 
 You can also install explicitly:
 
 ```bash
 ./htail --install
-# or choose another command name
 ./htail --install htail
 ```
 
 ## Usage
 
+Watch one file:
+
 ```bash
-ht file.md
-ht -n 100 logfile.txt
-ht -n 0 agent-output.md
+ht reviewer.md
 ```
 
-`-n` controls **only the initial context**. Once htail is running, every observed change is retained; a 500-line update is not truncated to the initial line count.
+Watch several files at once:
+
+```bash
+ht reviewer.md implementer.md
+ht --layout rows reviewer.md implementer.md
+ht --layout columns reviewer.md implementer.md
+ht --layout grid *.log
+ht --layout stream reviewer.md implementer.md
+```
+
+`-n` controls **only the initial context per file**. Once htail is running, every observed change is retained.
+
+### Multi-file layouts
+
+- `auto` — chooses rows/columns/grid from file count and terminal geometry.
+- `rows` — vertical stacking.
+- `columns` — horizontal stacking.
+- `grid` — automatic N×M pane composition.
+- `stream` — one chronological feed with every update labelled by source file.
+
+Press `l` while htail is running to switch layout without restarting. Pane scroll positions, pause state, captured history, and unseen-update counts are preserved.
 
 ### Interactive controls
 
-| Key | Action |
+| Key / input | Action |
 |---|---|
-| `↑` / `↓` | Scroll one visual row |
-| `PgUp` / `PgDn` | Scroll one page |
-| `Home` / `End` | First line / bottom |
-| `[` / `]` | Previous / next captured update |
-| `f` | Jump to the beginning of the freshest update |
-| `p` | Pause/resume automatic jumps; file changes are still captured |
-| `c` | Clear displayed history without resetting file tracking |
-| `u` | Check GitHub now; if an update is available, open the confirmation dialog |
+| `Tab` / `Shift+Tab` | Focus next / previous pane |
+| `1`–`9` | Focus a pane directly |
+| mouse click | Focus the pane under the pointer |
+| mouse wheel | Scroll the pane under the pointer |
+| `l` | Open the live layout chooser |
+| `z` | Maximize focused pane / restore layout |
+| `↑` / `↓` | Scroll focused pane one visual row |
+| `PgUp` / `PgDn` | Scroll focused pane one page |
+| `Home` / `End` | First line / bottom of focused pane |
+| `[` / `]` | Previous / next captured update in focused pane |
+| `f` | Jump focused pane to its freshest update |
+| `p` | Pause/resume automatic jumps in focused pane |
+| `c` | Clear focused pane history without resetting file tracking |
+| `u` | Check GitHub now; if available, show update confirmation/changelog |
 | `?` | Toggle help |
 | `q` | Quit |
 
-New updates open at their **first line**, not at their end. While paused, htail keeps collecting updates but does not move the viewport.
+Mouse tracking can be disabled with `--no-mouse`. Keyboard controls always remain available.
+
+A new update moves **only its own pane** to the beginning of that update. Other panes keep their current reading position. While a pane is paused, changes are still captured and its title reports unseen updates.
 
 ## Display features
 
-- Timestamped and numbered update batches.
-- New/replacement content highlighted without destroying syntax colours.
+- Timestamped and numbered update batches per file.
+- Highlighted new/replacement content with a persistent change gutter across wrapped rows.
 - Rendered Markdown headings, emphasis, lists, links, rules, and fenced code.
-- Optional Pygments syntax highlighting for Python, JSON, YAML, TOML, shell, and other formats.
-- Automatic Pygments installation prompt when richer highlighting is useful and Pygments is missing.
-- Soft wrapping to terminal width.
-- **Hanging indents** for wrapped bullets, task-list items, and numbered lists.
-- Idle-time status and configurable idle warning.
-- Display-only `--grep` / `--exclude` filters; hidden lines remain part of internal change tracking.
+- Optional Pygments syntax highlighting for code and fenced blocks.
+- Soft wrapping with hanging indents for bullets, task lists, and numbered lists.
+- Per-pane pause, scrolling, update navigation, idle state, and unseen-update counts.
+- Display-only `--grep` / `--exclude` filters; hidden lines remain in change tracking.
 - Robust following across append, truncation, rewrite, atomic replacement, staged writes, and same-size rewrites.
 
 ## Updates
 
-htail checks the latest GitHub Release when the interactive viewer starts and automatically re-checks once per hour during long-running sessions. Press `u` at any time to force an immediate check. If a newer release is available, the footer shows an update indicator.
+htail checks GitHub on startup and once per hour during long sessions. Press `u` to force an immediate check. The in-app update panel shows release notes split into **New features** and **Bug fixes**.
 
-Press `u` to check immediately. If a newer release is found, `u` opens a confirmation dialog. If confirmed, htail:
-
-1. downloads the `htail` release asset;
-2. downloads and verifies `htail.sha256`;
-3. validates the downloaded Python source and embedded version;
-4. keeps a `.bak` copy of the current executable;
-5. atomically replaces the current executable; and
-6. reopens the **same file with the same command-line options**.
-
-Command-line update checks are also available:
+After confirmation htail downloads the release asset and checksum, verifies SHA-256, keeps a `.bak` copy, atomically replaces itself, and reopens **all watched files with the same command-line options**.
 
 ```bash
 ht --check-update
 ht --update
 ```
 
-No update is installed automatically without confirmation.
+No update is installed without confirmation.
 
 ## Useful options
 
 ```bash
-# Only show future changes
 ht -n 0 file.md
-
-# Faster content verification
 ht --verify-interval 0.5 file.md
-
-# Warn after two minutes without changes
 ht --idle-warn 120 file.md
-
-# Display filters (tracking remains complete)
-ht --grep 'REVIEW|IMPLEMENTER' file.md
-ht --exclude 'DEBUG' file.md
-
-# Explicit syntax selection / disable rendering
+ht --grep 'REVIEW|IMPLEMENTER' *.md
+ht --exclude 'DEBUG' *.log
 ht --syntax markdown file.txt
-ht --syntax python script.txt
 ht --syntax none file.md
-
-# Show removed lines as well
 ht --show-deletions file.md
+ht --no-mouse a.log b.log
 ```
 
-## Development and releases
+## Development
 
-The project is intentionally a single executable Python script with no required third-party dependency. Tests use the standard library `unittest` runner:
+The repository source is split into modules under `src/htail_app/`, while releases remain a **single executable text file** for curl installation and atomic self-update. `tools/build_release.py` packages the source into the standalone `htail` wrapper.
 
 ```bash
-python -m unittest discover -s tests -v
+PYTHONPATH=src python -m unittest discover -s tests -v
+python tools/build_release.py --output /tmp/htail
+python /tmp/htail --version
 ```
-
-Releases are created from tags such as `v0.7.0`. The release workflow verifies that the tag matches `HTAIL_VERSION`, runs the tests, and publishes both `htail` and `htail.sha256`.
