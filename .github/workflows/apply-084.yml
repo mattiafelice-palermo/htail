@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Apply source patch
-        run: python .github/patch_084.py
+        run: python .github/patch_084_v2.py
       - name: Compile
         run: python -m compileall -q src tests tools
       - name: Run tests
