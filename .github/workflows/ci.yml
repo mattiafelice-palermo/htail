@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Compile source
+        run: python -m compileall -q src tools tests
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Build standalone executable
+        run: python tools/build_release.py --output /tmp/htail
+      - name: Smoke test bundle
+        run: |
+          python /tmp/htail --version
+          test "$(python /tmp/htail --version)" = "htail 0.8.0"
