@@ -512,6 +512,29 @@ class MultiApp:
         ])
         return _panel_lines("Update available", content, width, height, self.color)
 
+    def _install_worker(self, release: core.ReleaseInfo) -> None:
+        """Install a confirmed release off the UI thread and schedule restart.
+
+        The 0.8.1/0.8.2 modal path started a thread targeting this method, but
+        the method was accidentally omitted during the MultiApp refactor.
+        Keeping installation here makes the interactive path use the same
+        validated UpdateService.install() implementation as `ht --update`.
+        """
+        target = executable_path()
+        try:
+            self.update_install_status = "Downloading, verifying and installing update…"
+            self.update_install_progress = None
+            self.dirty = True
+            ok, message = self.update_service.install(release, target)
+        except Exception as exc:
+            ok, message = False, f"update failed: {exc}"
+
+        self.update_install_result = (ok, message)
+        self.update_installing = False
+        if ok:
+            self.pending_restart = (target, list(sys.argv[1:]), message)
+        self.dirty = True
+
     def _status_lines(self, width: int, body_height: int) -> List[str]:
         now = time.monotonic()
         lead = self.message if self.message and now <= self.message_until else None

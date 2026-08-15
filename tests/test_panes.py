@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from htail_app import core
 from htail_app.app import MultiApp, parse_args
@@ -80,6 +81,45 @@ class MultiAppInteractionTests(unittest.TestCase):
             self.assertEqual(app.focus, 1)
             app.handle_input(MouseEvent(x=10, y=5, button="left", pressed=False))
             self.assertEqual(app.focus, 1)
+
+    def test_confirmed_interactive_update_runs_worker_and_schedules_restart(self):
+        class ImmediateThread:
+            def __init__(self, target, args=(), **_kwargs):
+                self.target = target
+                self.args = args
+
+            def start(self):
+                self.target(*self.args)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.md"
+            path.write_text("a\n", encoding="utf-8")
+            args = parse_args([str(path), "--no-color", "--no-self-install-prompt"])
+            filt = core.compile_display_filter(args)
+            service = core.UpdateService("example/repo")
+            app = MultiApp(args, False, filt, service)
+            release = core.ReleaseInfo(
+                version="9.9.9",
+                tag="v9.9.9",
+                asset_url="https://example.invalid/htail",
+                asset_name="htail",
+                checksum_url="https://example.invalid/htail.sha256",
+            )
+            app.update_release = release
+            app.update_confirm_active = True
+
+            with mock.patch("htail_app.app.threading.Thread", ImmediateThread), mock.patch.object(
+                service, "install", return_value=(True, "updated htail")
+            ) as install:
+                # Regression: 0.8.1/0.8.2 raised AttributeError here because
+                # MultiApp._install_worker did not exist.
+                app.handle_input("y")
+
+            install.assert_called_once()
+            self.assertFalse(app.update_installing)
+            self.assertEqual(app.update_install_result, (True, "updated htail"))
+            self.assertIsNotNone(app.pending_restart)
+            self.assertEqual(app.pending_restart[2], "updated htail")
 
 
 
