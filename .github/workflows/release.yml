@@ -1,0 +1,50 @@
+name: Release htail
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Verify tag matches script version
+        shell: bash
+        run: |
+          version="$(python htail --version | awk '{print $2}')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "HTAIL_VERSION=$version does not match tag $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          chmod +x htail
+          sha256sum htail > htail.sha256
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" htail htail.sha256 --clobber
