@@ -31,7 +31,6 @@ jobs:
           mkdir -p src/htail_app
           cp htail src/htail_app/core.py
           rm -rf .staging
-          rm -f .github/workflows/stage-0.8.0.yml
 
       - name: Compile
         run: python -m compileall -q src tools tests
@@ -53,6 +52,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add README.md RELEASE_NOTES.md src tools tests
+          git add -A .staging
           git commit -m "Implement multi-file pane manager for htail 0.8.0"
           git push origin HEAD:feature/multipane-0.8.0
