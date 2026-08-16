@@ -19,15 +19,21 @@ release procedure, and failure handling.
   docs-only fast path in `docs/AGENT_WORKFLOW.md`. Never push a known failure,
   and report exactly which gate was run.
 - After local validation, publish the exact final tree efficiently: normally
-  one feature commit and one PR. If the local shell cannot push to GitHub, it
-  is fine to upload the final changed-file blobs/tree once through the GitHub
-  connector. Do not create temporary Actions workflows, patch-transport
-  commits, or staging files just to move tested code to GitHub.
+  one feature commit and one feature-branch push. That push triggers CI. After
+  the exact commit is green, confirm `main` has not moved and promote that
+  tested commit to `main`; do not open a PR unless explicitly requested. Use
+  `workflow_dispatch` only when a manual CI run is actually needed. If the
+  local shell cannot push to GitHub, it is fine to upload the final changed-file
+  blobs/tree once through the GitHub connector. Do not create temporary Actions
+  workflows, patch-transport commits, or staging files just to move tested code
+  to GitHub.
 - If CI fails, diagnose the failure, fix it locally, rerun the required local
-  gate, then update the PR. Do not iterate by using CI as the test runner.
-- Merge only after the complete PR CI gate is green. Use the normal **merge**
-  method unless explicitly instructed otherwise. Do not claim a branch was
-  deleted unless it actually was.
+  gate, then push a replacement feature commit. Do not iterate by using CI as
+  the test runner.
+- Promote only the exact feature commit that passed the complete CI gate. If
+  `main` moved after the tested commit was based, rebase/rebuild locally and
+  revalidate instead of silently promoting a stale commit. Do not claim a
+  branch was deleted unless it actually was.
 - Product-source changes (`src/` or `tools/`) require a version bump and release
   notes. Documentation-only changes do not bump the version unless requested.
 - Every new release entry in `RELEASE_NOTES.md` must use exactly these two
@@ -42,4 +48,4 @@ unavailable. Use the connected GitHub tooling for repository reads/writes and
 keep implementation/testing local. Keep tool use proportionate to the task:
 batch independent operations when practical, avoid rediscovering connector
 capabilities already known in the session, and do not block on unrelated
-post-merge workflows.
+post-promotion workflows.

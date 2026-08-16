@@ -13,7 +13,7 @@ This file contains operational detail intentionally kept out of the root
 - `tools/build_release.py` — builds the standalone `htail` wrapper.
 - `tools/build_runtime.py` — builds/self-tests runtime assets.
 - `RELEASE_NOTES.md` — release changelog used by the GitHub release workflow.
-- `.github/workflows/ci.yml` — PR/push release gate.
+- `.github/workflows/ci.yml` — feature-branch push/manual validation gate.
 - `.github/workflows/release.yml` — main/tag release workflow.
 
 ## Development sequence
@@ -33,13 +33,17 @@ This file contains operational detail intentionally kept out of the root
    logic in the test.
 5. Run the applicable local gate below before the first GitHub push that
    triggers CI.
-6. Push/publish only the final tested files. Keep the PR history clean; one
-   coherent feature commit is preferred when practical.
-7. Wait for the complete PR CI gate. If it fails, fetch the failing job/log,
+6. Push/publish only the final tested files as one coherent feature commit when
+   practical. The feature-branch push triggers CI exactly once for that commit.
+7. Wait for the complete branch CI gate. If it fails, fetch the failing job/log,
    reproduce or cover the issue locally, fix locally, rerun the local gate, and
-   only then update the PR.
-8. Merge normally after CI is green. For a versioned product change, verify the
-   post-merge release workflow and resulting release/tag.
+   only then push a replacement feature commit.
+8. After CI is green, re-read the current `main` SHA. If it is still the base
+   used for the tested commit, promote that exact commit to `main` (normally a
+   fast-forward ref update). If `main` moved, rebuild/rebase locally on the new
+   base and rerun the required local gate and CI before promotion.
+9. For a versioned product change, verify the post-promotion release workflow
+   and resulting release/tag.
 
 ## Local validation gates
 
@@ -108,8 +112,8 @@ heading/template conventions. Run a targeted script or test when the edited
 documentation is machine-consumed or when a repository check exists for it.
 
 Do not run the full application unit suite merely to prove that prose did not
-change Python behavior. The PR still goes through the repository's normal full
-CI gate before merge.
+change Python behavior. The feature-branch push still goes through the
+repository's normal full CI gate before promotion to `main`.
 
 ## GitHub transport when shell network is unavailable
 
@@ -120,7 +124,8 @@ the local gate is green, the GitHub connector may be used as the transport:
 2. Create the feature branch from that base.
 3. Upload the final versions of **only the changed files**, preferably as blobs
    plus one tree and one commit.
-4. Open the PR and let the normal CI workflow run.
+4. Create/update the feature branch to that commit. The branch push is the CI
+   trigger; do not open a PR unless explicitly requested.
 
 Sending a final complete file blob is acceptable transport; repeatedly replacing
 whole files through the API while developing is not. Avoid temporary workflow
@@ -136,21 +141,24 @@ For efficient connector use:
   sequence of per-file development commits.
 - Poll CI at a cadence appropriate to its normal runtime rather than in tight
   loops.
-- After merge, wait for and verify a post-merge release workflow when the
+- After promotion, wait for and verify the release workflow when the
   change affects product source, versioning, build/release behavior, or when
-  explicitly requested. For a documentation-only change, confirming the merge
-  is normally sufficient; an unrelated release workflow need not block task
-  completion.
+  explicitly requested. For a documentation-only change, confirming promotion
+  to `main` is normally sufficient; an unrelated release workflow need not
+  block task completion.
 
-## CI and merge policy
+## CI and promotion policy
 
-The PR gate in `.github/workflows/ci.yml` includes compilation, the full unit
-suite, the `v0.9.0` invariant comparison, standalone/runtime builds, and smoke
-tests. A green unit-test step alone is not sufficient; wait for the whole job.
+The branch gate in `.github/workflows/ci.yml` includes compilation, the full
+unit suite, the `v0.9.0` invariant comparison, standalone/runtime builds, and
+smoke tests. It runs on pushes to branches other than `main`;
+`workflow_dispatch` exists for explicit manual reruns. A green unit-test step
+alone is not sufficient; wait for the whole job.
 
-Use a normal merge commit (`merge`, not squash/rebase) unless the user requests
-a different method. Preserve the feature branch unless branch deletion is
-explicitly requested/performed.
+After the exact feature commit is green, promote it to `main` only if `main`
+still points at the base commit used to build it. A direct fast-forward is
+preferred because it preserves the exact CI-tested commit. Preserve the feature
+branch unless branch deletion is explicitly requested/performed.
 
 ## Versioning and release notes
 
@@ -185,6 +193,6 @@ release entry.
 ## Reporting
 
 Be precise about what was actually validated. Report local test counts, CI run
-status, merge SHA, and release status only when observed. Do not imply that a
+status, promoted commit SHA, and release status only when observed. Do not imply that a
 full suite, branch deletion, release publication, or other action happened when
 it did not.

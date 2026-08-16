@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import threading
 import time
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from .watcher import WatchNotice, WatchUpdate, analyze_changes
 
@@ -125,7 +125,15 @@ def list_remote_refs(context: GitFileContext) -> Tuple[List[GitRemoteRef], Optio
     return refs, "; ".join(warnings) if warnings else None
 
 
-def remote_head_sha(context: GitFileContext, remote: str, branch: str) -> str:
+def remote_head_sha(
+    context: GitFileContext,
+    remote: str,
+    branch: str,
+    *,
+    progress: Optional[Callable[[str], None]] = None,
+) -> str:
+    if progress is not None:
+        progress(f"Checking {remote}/{branch}…")
     result = _git(context.root, "ls-remote", remote, f"refs/heads/{branch}")
     if result.returncode != 0:
         raise GitRemoteError(_failure(result, f"could not query {remote}/{branch}"))
@@ -136,7 +144,15 @@ def remote_head_sha(context: GitFileContext, remote: str, branch: str) -> str:
     raise GitRemoteError(f"remote branch {remote}/{branch} does not exist")
 
 
-def _fetch_branch(context: GitFileContext, remote: str, branch: str) -> str:
+def _fetch_branch(
+    context: GitFileContext,
+    remote: str,
+    branch: str,
+    *,
+    progress: Optional[Callable[[str], None]] = None,
+) -> str:
+    if progress is not None:
+        progress(f"Fetching Git objects for {remote}/{branch}…")
     result = _git(
         context.root,
         "fetch",
@@ -148,6 +164,8 @@ def _fetch_branch(context: GitFileContext, remote: str, branch: str) -> str:
     )
     if result.returncode != 0:
         raise GitRemoteError(_failure(result, f"could not fetch {remote}/{branch}"))
+    if progress is not None:
+        progress("Resolving fetched commit…")
     resolved = _git(context.root, "rev-parse", "FETCH_HEAD")
     if resolved.returncode != 0:
         raise GitRemoteError(_failure(resolved, "could not resolve fetched commit"))
@@ -161,11 +179,14 @@ def read_remote_snapshot(
     encoding: str,
     *,
     expected_sha: Optional[str] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, List[str]]:
     """Fetch one remote branch and return the repository-relative file snapshot."""
-    wanted_sha = expected_sha or remote_head_sha(context, remote, branch)
-    fetched_sha = _fetch_branch(context, remote, branch)
+    wanted_sha = expected_sha or remote_head_sha(context, remote, branch, progress=progress)
+    fetched_sha = _fetch_branch(context, remote, branch, progress=progress)
     sha = fetched_sha or wanted_sha
+    if progress is not None:
+        progress(f"Loading {context.relative_path} from {remote}/{branch}…")
     result = _git(
         context.root,
         "show",
@@ -230,7 +251,10 @@ class GitRemoteFollower:
             return []
         return list(self.previous[-self.args.lines:])
 
-    def initialize_if_available(self) -> WatchNotice:
+    def initialize_if_available(
+        self,
+        progress: Optional[Callable[[str], None]] = None,
+    ) -> WatchNotice:
         if self.initialized:
             return WatchNotice("initial", initial_tail=self._initial_tail())
         try:
@@ -239,6 +263,7 @@ class GitRemoteFollower:
                 self.remote,
                 self.branch,
                 self.args.encoding,
+                progress=progress,
             )
         except GitRemoteError as exc:
             return WatchNotice("error", str(exc))

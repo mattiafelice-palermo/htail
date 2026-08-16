@@ -48,6 +48,23 @@ class PaletteItem:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class GitSourceRefsResult:
+    refs: List[GitRemoteRef]
+    warning: Optional[str]
+
+
+@dataclass(frozen=True)
+class GitSourceApplyResult:
+    value: object
+    follower: Optional[object]
+    lines: Optional[List[str]]
+    source_label: Optional[str]
+    native_watch_path: Optional[Path]
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+
 def executable_path() -> Path:
     """Return the self-updatable wrapper rather than the cached package payload."""
     wrapped = os.environ.get("HTAIL_EXECUTABLE")
@@ -261,8 +278,17 @@ def _dim_line(text: str, color: bool) -> str:
     return core.DIM + plain + core.RESET
 
 
-def _panel_geometry(title: str, content: Sequence[str], width: int, height: int, color: bool) -> Tuple[int, int, int, int, List[str]]:
-    if width < 34 or height < 5:
+def _panel_geometry(
+    title: str,
+    content: Sequence[str],
+    width: int,
+    height: int,
+    color: bool,
+    *,
+    max_width: int = 90,
+    min_width: int = 34,
+) -> Tuple[int, int, int, int, List[str]]:
+    if width < min_width or height < 5:
         rows: List[str] = []
         for line in content:
             rows.extend(core.wrap_ansi(line, width) if line else [""])
@@ -271,7 +297,7 @@ def _panel_geometry(title: str, content: Sequence[str], width: int, height: int,
         rows = [_pad(line, width) for line in rows[:height]] + [" " * width] * max(0, height - len(rows))
         return 0, 0, width, min(height, len(rows)), rows[:height]
 
-    panel_width = min(90, max(34, width - 6))
+    panel_width = min(max_width, max(min_width, width - 6))
     inner_width = panel_width - 4
     rendered: List[str] = []
     for line in content:
@@ -307,8 +333,25 @@ def _panel_geometry(title: str, content: Sequence[str], width: int, height: int,
     return left, top_y, panel_width, len(rows), rows
 
 
-def _panel_lines(title: str, content: Sequence[str], width: int, height: int, color: bool) -> List[str]:
-    left, top_y, panel_width, panel_height, panel_rows = _panel_geometry(title, content, width, height, color)
+def _panel_lines(
+    title: str,
+    content: Sequence[str],
+    width: int,
+    height: int,
+    color: bool,
+    *,
+    max_width: int = 90,
+    min_width: int = 34,
+) -> List[str]:
+    left, top_y, panel_width, panel_height, panel_rows = _panel_geometry(
+        title,
+        content,
+        width,
+        height,
+        color,
+        max_width=max_width,
+        min_width=min_width,
+    )
     out = [" " * width for _ in range(height)]
     for i, row in enumerate(panel_rows[:height]):
         y = top_y + i
@@ -345,6 +388,23 @@ def _overlay_modal(background: Sequence[str], panel: Sequence[str], width: int, 
         right = _slice_ansi(bg, end, max(0, width - end))
         out.append(_dim_line(left, color) + mid + _dim_line(right, color))
     return out
+
+
+def _spinner_frame(now: float) -> str:
+    frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    return frames[int(now * 10.0) % len(frames)]
+
+
+def _indeterminate_bar(width: int, now: float) -> str:
+    width = max(8, width)
+    span = max(2, width // 5)
+    travel = max(1, width - span)
+    phase = int(now * 12.0) % (travel * 2)
+    offset = phase if phase < travel else (travel * 2 - phase)
+    cells = ["─"] * width
+    for index in range(offset, min(width, offset + span)):
+        cells[index] = "█"
+    return "".join(cells)
 
 
 class MultiApp:
@@ -444,6 +504,17 @@ class MultiApp:
         self._git_source_context: Optional[GitFileContext] = None
         self._git_source_refs: List[GitRemoteRef] = []
         self._git_source_warning: Optional[str] = None
+        self._git_source_refs_loading = False
+        self._git_source_refs_loaded = False
+        self._git_source_refs_thread: Optional[threading.Thread] = None
+        self._git_source_refs_result: Optional[GitSourceRefsResult] = None
+        self._git_source_apply_thread: Optional[threading.Thread] = None
+        self._git_source_apply_result: Optional[GitSourceApplyResult] = None
+        self._git_source_apply_inflight = False
+        self._git_source_apply_target: Optional[object] = None
+        self._git_source_progress_stage: Optional[str] = None
+        self._git_source_progress_started_at: Optional[float] = None
+        self._git_source_error: Optional[str] = None
         self._last_frame: Optional[List[str]] = None
         self._last_frame_geometry: Optional[Tuple[int, int]] = None
         self.render_rows_written = 0
@@ -756,10 +827,10 @@ class MultiApp:
                 return []
             current = pane.source_label or "LOCAL"
             local_label = "✓ Local working tree" if current == "LOCAL" else "Local working tree"
-            items = [PaletteItem(local_label, "git-source-select", None, context.relative_path)]
+            items = [PaletteItem(local_label, "git-source-select", None, "LOCAL")]
             for ref in self._git_source_refs:
-                label = f"✓ {ref.label}" if current == ref.label else ref.label
-                items.append(PaletteItem(label, "git-source-select", (ref.remote, ref.branch), context.relative_path))
+                label = f"✓ {ref.branch}" if current == ref.label else ref.branch
+                items.append(PaletteItem(label, "git-source-select", (ref.remote, ref.branch), ref.remote))
             return items
         items = [
             PaletteItem("Markdown outline", "outline", detail="jump to a heading"),
@@ -795,16 +866,31 @@ class MultiApp:
             self.set_message("selected file has no Git remote")
             self.palette_active = False
             return
-        refs, warning = list_remote_refs(context)
         self._git_source_context = context
-        self._git_source_refs = refs
-        self._git_source_warning = warning
+        self._git_source_refs = []
+        self._git_source_warning = None
+        self._git_source_error = None
         self.palette_mode = "git-source"
         self.palette_buffer = ""
         self.palette_selected = 0
+        self._git_source_refs_loading = True
+        self._git_source_refs_loaded = False
+        self._git_source_progress_stage = "Loading remote branches…"
+        self._git_source_progress_started_at = time.monotonic()
+        self._git_source_refs_result = None
+        self._git_source_refs_thread = threading.Thread(
+            target=self._load_git_source_refs_worker,
+            args=(context,),
+            daemon=True,
+            name="htail-git-source-refs",
+        )
+        self._git_source_refs_thread.start()
         self._refresh_palette()
-        if warning and not refs:
-            self.set_message(warning, 6.0)
+        self.dirty = True
+
+    def _load_git_source_refs_worker(self, context: GitFileContext) -> None:
+        refs, warning = list_remote_refs(context)
+        self._git_source_refs_result = GitSourceRefsResult(refs=refs, warning=warning)
 
     def _replace_active_source(self, follower: object, initial_lines: Sequence[str], source_label: Optional[str]) -> None:
         index = self.focus
@@ -821,32 +907,127 @@ class MultiApp:
         self._global_search_corpus_signature = None
         self._global_search_cache_key = None
 
-    def _switch_active_git_source(self, value: object) -> None:
-        if self._git_source_context is None:
-            return
+    def _git_source_apply_progress(self, stage: str) -> None:
+        self._git_source_progress_stage = stage
+
+    def _switch_active_git_source_worker(self, value: object) -> None:
+        assert self._git_source_context is not None
         pane = self.active_pane()
         if value is None:
             follower = FileFollower(pane.path, self.args)
             notice = follower.initialize_if_available()
             if notice is None:
-                self._replace_active_source(follower, [], None)
-                pane.waiting = True
-                pane.set_message("LOCAL · waiting for file", 4.0)
+                self._git_source_apply_result = GitSourceApplyResult(
+                    value=value,
+                    follower=follower,
+                    lines=[],
+                    source_label=None,
+                    native_watch_path=pane.path,
+                    message="LOCAL · waiting for file",
+                )
                 return
             if notice.kind == "error":
-                self.set_message(notice.text, 6.0)
+                self._git_source_apply_result = GitSourceApplyResult(
+                    value=value,
+                    follower=None,
+                    lines=None,
+                    source_label=None,
+                    native_watch_path=None,
+                    error=notice.text,
+                )
                 return
-            self.native_watch.add_file(pane.path)
-            self._replace_active_source(follower, follower.previous, None)
+            self._git_source_apply_result = GitSourceApplyResult(
+                value=value,
+                follower=follower,
+                lines=list(follower.previous),
+                source_label=None,
+                native_watch_path=pane.path,
+                message="source: LOCAL",
+            )
             return
 
         remote, branch = value
         follower = GitRemoteFollower(self._git_source_context, str(remote), str(branch), self.args)
-        notice = follower.initialize_if_available()
+        notice = follower.initialize_if_available(progress=self._git_source_apply_progress)
         if notice.kind == "error":
-            self.set_message(notice.text, 6.0)
+            self._git_source_apply_result = GitSourceApplyResult(
+                value=value,
+                follower=None,
+                lines=None,
+                source_label=None,
+                native_watch_path=None,
+                error=notice.text,
+            )
             return
-        self._replace_active_source(follower, follower.previous, follower.label)
+        self._git_source_apply_result = GitSourceApplyResult(
+            value=value,
+            follower=follower,
+            lines=list(follower.previous),
+            source_label=follower.label,
+            native_watch_path=None,
+            message=f"source: {follower.label}",
+        )
+
+    def _switch_active_git_source(self, value: object) -> None:
+        if self._git_source_context is None or self._git_source_apply_inflight:
+            return
+        self._git_source_error = None
+        self._git_source_apply_result = None
+        self._git_source_apply_inflight = True
+        self._git_source_apply_target = value
+        if value is None:
+            self._git_source_progress_stage = "Restoring local working tree…"
+        else:
+            remote, branch = value
+            self._git_source_progress_stage = f"Preparing {remote}/{branch}…"
+        self._git_source_progress_started_at = time.monotonic()
+        self._git_source_apply_thread = threading.Thread(
+            target=self._switch_active_git_source_worker,
+            args=(value,),
+            daemon=True,
+            name="htail-git-source-apply",
+        )
+        self._git_source_apply_thread.start()
+        self.dirty = True
+
+    def _complete_git_source_background_work(self) -> None:
+        if self._git_source_refs_thread is not None and not self._git_source_refs_thread.is_alive():
+            self._git_source_refs_thread = None
+            self._git_source_refs_loading = False
+            self._git_source_refs_loaded = True
+            result = self._git_source_refs_result
+            self._git_source_refs_result = None
+            if result is not None:
+                self._git_source_refs = result.refs
+                self._git_source_warning = result.warning
+            self._git_source_progress_stage = None if not self._git_source_apply_inflight else self._git_source_progress_stage
+            self._refresh_palette()
+            self.dirty = True
+
+        if self._git_source_apply_thread is not None and not self._git_source_apply_thread.is_alive():
+            self._git_source_apply_thread = None
+            self._git_source_apply_inflight = False
+            result = self._git_source_apply_result
+            self._git_source_apply_result = None
+            self._git_source_progress_stage = None
+            if result is None:
+                return
+            if result.error:
+                self._git_source_error = result.error
+                self.set_message(result.error, 6.0)
+                self.dirty = True
+                return
+            assert result.follower is not None and result.lines is not None
+            if result.native_watch_path is not None:
+                self.native_watch.add_file(result.native_watch_path)
+            self._replace_active_source(result.follower, result.lines, result.source_label)
+            pane = self.active_pane()
+            if result.value is None and not result.lines:
+                pane.waiting = True
+                pane.set_message("LOCAL · waiting for file", 4.0)
+            self.palette_active = False
+            self._git_source_apply_target = None
+            self.dirty = True
 
     @staticmethod
     def _palette_matches(label: str, query: str) -> bool:
@@ -905,16 +1086,17 @@ class MultiApp:
             self.focus = int(item.value)
         elif item.action == "git-source-select":
             self._switch_active_git_source(item.value)
+            self.dirty = True
+            return
         self.palette_active = False
         self.dirty = True
 
     def _palette_lines(self, width: int, height: int) -> List[str]:
         self._refresh_palette()
+        if self.palette_mode == "git-source":
+            return self._git_source_lines(width, height)
         if self.palette_mode == "outline":
             title = "Markdown outline"
-        elif self.palette_mode == "git-source":
-            path = self._git_source_context.relative_path if self._git_source_context else "file"
-            title = f"File source · {path}"
         else:
             title = "Command palette"
         content = [core.paint("> " + self.palette_buffer + "▌", core.BOLD_LIGHT_CYAN, self.color), ""]
@@ -934,6 +1116,75 @@ class MultiApp:
                 content.append(row)
         content.extend(["", "↑/↓ select · Enter apply · Esc close · type to filter"])
         return _panel_lines(title, content, width, height, self.color)
+
+    def _git_source_lines(self, width: int, height: int) -> List[str]:
+        context = self._git_source_context
+        pane = self.active_pane()
+        current = pane.source_label or "LOCAL"
+        title = "File source"
+        path = context.relative_path if context is not None else "file"
+        display_query = self.palette_buffer if self.palette_buffer else core.paint("Filter sources…", core.DIM, self.color)
+        rows = [
+            core.paint(path, core.BOLD, self.color),
+            "",
+            core.paint("Current source:", core.BOLD_LIGHT_CYAN, self.color) + " " + (
+                "Local working tree" if current == "LOCAL" else current
+            ),
+            "",
+            core.paint("/ ", core.BOLD_LIGHT_CYAN, self.color) + display_query + core.paint("▌", core.BOLD_LIGHT_CYAN, self.color),
+            "",
+        ]
+
+        last_section = None
+        if not self.palette_items:
+            if self._git_source_refs_loading:
+                rows.append(core.paint("Loading remote branches…", core.DIM, self.color))
+            else:
+                rows.append(core.paint("No matches", core.DIM, self.color))
+        else:
+            visible_count = max(5, min(12, height - 14))
+            start = max(0, min(self.palette_selected - (visible_count // 2), max(0, len(self.palette_items) - visible_count)))
+            stop = min(len(self.palette_items), start + visible_count)
+            for index, item in enumerate(self.palette_items[start:stop], start=start):
+                section = item.detail or "REMOTE"
+                if section != last_section:
+                    rows.append(core.paint(section.upper(), core.BOLD_LIGHT_CYAN, self.color))
+                    last_section = section
+                prefix = "› " if index == self.palette_selected else "  "
+                line = prefix + item.label
+                if index == self.palette_selected:
+                    line = core.paint(line, "\x1b[1;30;106m", self.color)
+                rows.append(line)
+            if stop < len(self.palette_items):
+                rows.append(core.paint("… more results below", core.DIM, self.color))
+
+        if self._git_source_warning:
+            rows.extend(["", core.paint("Remote query warning: " + self._git_source_warning, core.BOLD_YELLOW, self.color)])
+        if self._git_source_error:
+            rows.extend(["", core.paint(self._git_source_error, core.BOLD_YELLOW, self.color)])
+
+        if self._git_source_refs_loading or self._git_source_apply_inflight:
+            now = time.monotonic()
+            bar_width = max(16, min(30, width - 48))
+            elapsed = 0.0
+            if self._git_source_progress_started_at is not None:
+                elapsed = max(0.0, now - self._git_source_progress_started_at)
+            stage = self._git_source_progress_stage or "Working…"
+            rows.extend([
+                "",
+                f"{_spinner_frame(now)} {stage}",
+                _indeterminate_bar(bar_width, now) + f"   {elapsed:0.1f}s",
+            ])
+
+        rows.extend([
+            "",
+            "↑/↓ select · Enter apply · Esc close · type to filter",
+        ])
+        if self._git_source_apply_inflight:
+            rows.append("Switch in progress…")
+        else:
+            rows.append("Background watching continues while this dialog is open")
+        return _panel_lines(title, rows, width, height, self.color, max_width=112, min_width=56)
 
     def _prompt_lines(self, width: int, height: int) -> List[str]:
         mode = self.prompt_mode or "search"
@@ -1468,7 +1719,11 @@ class MultiApp:
             body = base_body
 
         if self.palette_active:
-            status = ["COMMAND PALETTE · type to filter · ↑↓ select · Enter apply · Esc close", "Background watching continues while this dialog is open"]
+            if self.palette_mode == "git-source":
+                tail = "Switch in progress…" if self._git_source_apply_inflight else "Background watching continues while this dialog is open"
+                status = ["FILE SOURCE · type to filter · ↑↓ select · Enter apply · Esc close", tail]
+            else:
+                status = ["COMMAND PALETTE · type to filter · ↑↓ select · Enter apply · Esc close", "Background watching continues while this dialog is open"]
         elif self.global_search_active:
             status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ match · Shift+↑↓ file · Ctrl+↑↓/Pg preview · Ctrl+W wrap · ←→ hscroll · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close", "Background watching continues while this dialog is open"]
         elif self.prompt_mode:
@@ -1570,6 +1825,11 @@ class MultiApp:
     def handle_input(self, event: InputEvent) -> bool:
         if self.palette_active and not isinstance(event, MouseEvent):
             key = event
+            if self.palette_mode == "git-source" and self._git_source_apply_inflight:
+                if key == "ESC":
+                    self.set_message("source switch in progress", 3.0)
+                    self.dirty = True
+                return False
             if key == "ESC":
                 self.palette_active = False; self.dirty = True; return False
             if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN"):
@@ -1929,12 +2189,17 @@ class MultiApp:
 
     def tick(self, now: float) -> None:
         self._tick_updates(now)
+        self._complete_git_source_background_work()
         for pane, follower in zip(self.panes, self.followers):
             lifecycle = getattr(follower, "lifecycle_text", None)
             status = lifecycle(now) if callable(lifecycle) else ""
             if pane.source_status != status:
                 pane.source_status = status
                 self.dirty = True
+        if self.palette_active and self.palette_mode == "git-source" and (
+            self._git_source_refs_loading or self._git_source_apply_inflight
+        ):
+            self.dirty = True
         if self.update_install_result is not None and not self.update_installing:
             ok, message = self.update_install_result
             self.update_install_result = None

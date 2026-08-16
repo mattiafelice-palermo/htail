@@ -5,8 +5,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 
 from htail_app import app, core
 from htail_app.git_remote import GitRemoteFollower, discover_git_file, list_remote_refs
@@ -53,6 +55,15 @@ class GitRepoFixture:
 
 @unittest.skipUnless(shutil.which("git"), "git is required")
 class GitRemoteSourceTests(unittest.TestCase):
+    def _wait_for_threads(self, application: app.MultiApp, timeout: float = 3.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            application.tick(time.monotonic())
+            if application._git_source_refs_thread is None and application._git_source_apply_thread is None:
+                return
+            time.sleep(0.01)
+        raise AssertionError("git source background work did not finish")
+
     def test_discovers_same_file_identity_and_remote_branch(self):
         with tempfile.TemporaryDirectory() as td:
             fixture = GitRepoFixture(Path(td))
@@ -102,12 +113,16 @@ class GitRemoteSourceTests(unittest.TestCase):
                 application.palette_selected = switch_index
                 application._execute_palette_item()
                 self.assertEqual(application.palette_mode, "git-source")
+                self._wait_for_threads(application)
                 remote_index = next(
                     i for i, item in enumerate(application.palette_items)
                     if item.value == ("origin", "main")
                 )
                 application.palette_selected = remote_index
                 application._execute_palette_item()
+                self.assertTrue(application.palette_active)
+                self._wait_for_threads(application)
+                self.assertFalse(application.palette_active)
 
                 self.assertIsInstance(application.followers[0], GitRemoteFollower)
                 self.assertEqual(application.panes[0].path, fixture.file)
@@ -121,12 +136,16 @@ class GitRemoteSourceTests(unittest.TestCase):
                 )
                 application.palette_selected = switch_index
                 application._execute_palette_item()
+                self._wait_for_threads(application)
                 local_index = next(
                     i for i, item in enumerate(application.palette_items)
                     if item.value is None
                 )
                 application.palette_selected = local_index
                 application._execute_palette_item()
+                self.assertTrue(application.palette_active)
+                self._wait_for_threads(application)
+                self.assertFalse(application.palette_active)
 
                 self.assertIsInstance(application.followers[0], FileFollower)
                 self.assertEqual(application.panes[0].snapshot_raw, ["local only\n"])
@@ -139,6 +158,50 @@ class GitRemoteSourceTests(unittest.TestCase):
                 application.palette_selected = switch_index
                 application._execute_palette_item()
                 self.assertTrue(application.palette_items[0].label.startswith("✓ Local working tree"))
+            finally:
+                application.close_native_watch()
+
+    def test_git_source_modal_renders_path_and_progress_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = GitRepoFixture(Path(td))
+            args = app.parse_args([str(fixture.file), "--no-native-watch", "--no-color"])
+            application = app.MultiApp(args, False, core.DisplayFilter(), core.UpdateService(""))
+            try:
+                application._open_git_source_palette()
+                lines = application._git_source_lines(120, 30)
+                text = "\n".join(core.strip_ansi(line) for line in lines)
+                self.assertIn("File source", text)
+                self.assertIn("docs/status.md", text)
+                self.assertIn("Current source:", text)
+                self.assertIn("Loading remote branches", text)
+            finally:
+                application.close_native_watch()
+
+    def test_remote_switch_is_asynchronous_and_reports_progress(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = GitRepoFixture(Path(td))
+            args = app.parse_args([str(fixture.file), "--no-native-watch", "--no-color"])
+            application = app.MultiApp(args, False, core.DisplayFilter(), core.UpdateService(""))
+            try:
+                application._git_source_context = discover_git_file(fixture.file)
+                self.assertIsNotNone(application._git_source_context)
+                proceed = threading.Event()
+                original = GitRemoteFollower.initialize_if_available
+
+                def delayed_initialize(self, progress=None):
+                    if progress is not None:
+                        progress("Fetching Git objects for origin/main…")
+                    proceed.wait(1.0)
+                    return original(self, progress=progress)
+
+                with mock.patch.object(GitRemoteFollower, "initialize_if_available", delayed_initialize):
+                    application._switch_active_git_source(("origin", "main"))
+                    self.assertTrue(application._git_source_apply_inflight)
+                    self.assertIsNotNone(application._git_source_progress_stage)
+                    self.assertIn("origin/main", application._git_source_progress_stage)
+                    proceed.set()
+                    self._wait_for_threads(application)
+                    self.assertIsInstance(application.followers[0], GitRemoteFollower)
             finally:
                 application.close_native_watch()
 

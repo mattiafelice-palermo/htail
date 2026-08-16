@@ -1,3 +1,16 @@
+# htail 0.16.9
+
+## New features
+
+- The Git file-source picker now uses a dedicated, wider modal with the watched repository-relative path shown once at the top, a clear current-source summary, grouped remote branches, and inline filtering.
+- Opening the Git source picker and switching to a remote branch now run asynchronously, so the TUI stays responsive while branch metadata or remote file contents are being loaded.
+- The source picker now shows live activity feedback while Git work is in progress, including phase text and an indeterminate progress bar instead of a silent pause.
+
+## Bug fixes
+
+- Switching to a remote branch no longer freezes the interface during the initial `ls-remote` / `fetch` / `show` cycle.
+- Validation CI now runs once on the feature-branch push, with a manual `workflow_dispatch` entry point retained for explicit reruns; the exact green commit can then be promoted to `main` without a duplicate PR CI cycle.
+
 # htail 0.16.8
 
 ## Git remote file sources
