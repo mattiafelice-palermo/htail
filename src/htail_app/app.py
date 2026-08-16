@@ -1134,10 +1134,12 @@ class MultiApp:
                     self.update_overall_progress = max(self.update_overall_progress, 0.84)
             elif stage.startswith("Runtime already"):
                 self.update_overall_progress = max(self.update_overall_progress, 0.94)
+            elif stage.startswith("Unpacking application"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.95)
             elif stage.startswith("Backing up"):
-                self.update_overall_progress = max(self.update_overall_progress, 0.96)
+                self.update_overall_progress = max(self.update_overall_progress, 0.97)
             elif stage.startswith("Installing") or stage.startswith("Replacing"):
-                self.update_overall_progress = max(self.update_overall_progress, 0.98)
+                self.update_overall_progress = max(self.update_overall_progress, 0.99)
             else:
                 self.update_overall_progress = max(self.update_overall_progress, 0.02)
             self.dirty = True

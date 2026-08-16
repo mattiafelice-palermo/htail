@@ -105,6 +105,7 @@ class RuntimeUpdateTests(unittest.TestCase):
         labels = [stage for stage, _, _ in stages]
         self.assertTrue(any(stage.startswith("Downloading runtime cp313") for stage in labels))
         self.assertTrue(any(stage.startswith("Verifying runtime cp313") for stage in labels))
+        self.assertIn("Unpacking application…", labels)
         unpack = [(current, total) for stage, current, total in stages if stage.startswith("Unpacking runtime cp313")]
         self.assertTrue(unpack)
         self.assertEqual(unpack[-1][0], unpack[-1][1])

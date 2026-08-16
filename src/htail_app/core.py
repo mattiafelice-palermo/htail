@@ -1354,6 +1354,19 @@ class UpdateService:
                 os.fsync(handle.fileno())
             os.chmod(temp_path, target.stat().st_mode)
 
+            report("Unpacking application…")
+            prepared = subprocess.run(
+                [sys.executable, str(temp_path), "--prepare-core"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20.0,
+                check=False,
+            )
+            if prepared.returncode != 0:
+                detail = prepared.stderr.strip() or f"exit code {prepared.returncode}"
+                return False, f"could not prepare updated application: {detail}"
+
             report("Backing up current executable…")
             backup = target.with_name(target.name + ".bak")
             shutil.copy2(target, backup)

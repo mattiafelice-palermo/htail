@@ -182,6 +182,8 @@ def _main():
     if hashlib.sha256(payload).hexdigest() != _PAYLOAD_SHA256:
         raise SystemExit("htail: embedded application payload failed integrity verification")
     env_dir = _extract_app(payload)
+    if sys.argv[1:] == ["--prepare-core"]:
+        return 0
     abi = f"cp{{sys.version_info.major}}{{sys.version_info.minor}}"
     runtime = _bootstrap_runtime(abi)
     paths = [str(env_dir / "app")]
