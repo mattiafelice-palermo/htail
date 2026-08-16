@@ -14,5 +14,11 @@ if text.count(redundant) != 1:
     raise RuntimeError(f'redundant migration marker count={text.count(redundant)}')
 text = text.replace(redundant, '', 1)
 
+write_marker = 'write(test12_path, test12)\n'
+contrast_patch = '''old_selected_ansi = '\\"\\\\x1b[103m\\" in row'\nnew_selected_ansi = '\\"\\\\x1b[1;30;103m\\" in row'\nif test12.count(old_selected_ansi) != 1:\n    raise RuntimeError(f"0.12 selected ANSI migration count={test12.count(old_selected_ansi)}")\ntest12 = test12.replace(old_selected_ansi, new_selected_ansi, 1)\nwrite(test12_path, test12)\n'''
+if text.count(write_marker) != 1:
+    raise RuntimeError(f'test12 write marker count={text.count(write_marker)}')
+text = text.replace(write_marker, contrast_patch, 1)
+
 path.write_text(text, encoding='utf-8')
 runpy.run_path(str(path), run_name='__main__')
