@@ -1140,6 +1140,8 @@ class MultiApp:
                 self.update_overall_progress = max(self.update_overall_progress, 0.97)
             elif stage.startswith("Installing") or stage.startswith("Replacing"):
                 self.update_overall_progress = max(self.update_overall_progress, 0.99)
+            elif stage.startswith("Verifying installed application"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.995)
             else:
                 self.update_overall_progress = max(self.update_overall_progress, 0.02)
             self.dirty = True
@@ -1947,11 +1949,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     core.enable_windows_ansi()
     if args.bundle_self_test:
+        wrapper_version = os.environ.get("HTAIL_WRAPPER_VERSION")
+        if wrapper_version and wrapper_version != VERSION:
+            print(
+                f"htail bundle self-test failed: wrapper {wrapper_version} loaded app {VERSION}",
+                file=sys.stderr,
+            )
+            return 1
+        active_app = os.environ.get("HTAIL_ACTIVE_APP")
+        if active_app:
+            loaded_app = Path(__file__).resolve().parents[1]
+            expected_app = Path(active_app).expanduser().resolve()
+            if loaded_app != expected_app:
+                print(
+                    f"htail bundle self-test failed: loaded app {loaded_app}, expected {expected_app}",
+                    file=sys.stderr,
+                )
+                return 1
         backend = fuzzy_backend()
         if backend == "unavailable":
             print("htail bundle self-test failed: RapidFuzz unavailable", file=sys.stderr)
             return 1
-        print(f"htail bundle self-test: {backend}")
+        print(f"htail bundle self-test: app {VERSION}; {backend}")
         return 0
     color = sys.stdout.isatty() and not args.no_color
     maybe_offer_self_install(args, color)
