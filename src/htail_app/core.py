@@ -95,7 +95,7 @@ SHOW_CURSOR = "\033[?25h"
 ALT_SCREEN_ON = "\033[?1049h"
 ALT_SCREEN_OFF = "\033[?1049l"
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+ANSI_RE = re.compile(r"(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~])")
 
 HTAIL_VERSION = "0.7.3"
 ACTIVE_VERIFY_WINDOW = 15.0
@@ -163,7 +163,9 @@ def clip_ansi(text: str, width: int) -> str:
         room = width - visible
         out.append(text[pos : pos + room])
 
-    # Ensure styles cannot leak into the status bar / following line.
+    # Ensure styles and OSC-8 hyperlink state cannot leak into the following row.
+    if "\x1b]8;;" in text:
+        out.append("\x1b]8;;\x1b\\")
     out.append(RESET)
     return "".join(out)
 

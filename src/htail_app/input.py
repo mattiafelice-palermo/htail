@@ -30,7 +30,7 @@ def normalize_plain_key(ch: str) -> str:
 
 def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
     mapping = {
-        "\x1b[A": "UP", "\x1b[B": "DOWN", "\x1b[5~": "PAGEUP",
+        "\x1b[A": "UP", "\x1b[B": "DOWN", "\x1b[C": "RIGHT", "\x1b[D": "LEFT", "\x1b[5~": "PAGEUP",
         "\x1b[6~": "PAGEDOWN", "\x1b[H": "HOME", "\x1b[F": "END",
         "\x1bOH": "HOME", "\x1bOF": "END", "\x1b[Z": "SHIFT_TAB",
         "\x1b": "ESC",
@@ -123,7 +123,7 @@ class InputReader:
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0") and msvcrt.kbhit():
                 special = msvcrt.getwch()
-                return {"H": "UP", "P": "DOWN", "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END"}.get(special)
+                return {"H": "UP", "P": "DOWN", "M": "RIGHT", "K": "LEFT", "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END"}.get(special)
             return normalize_plain_key(ch)
         except Exception:
             return None
@@ -155,7 +155,7 @@ class InputReader:
                 seq += read_char()
                 if seq.startswith("\x1b[<") and seq[-1:] in ("M", "m"):
                     break
-                if not seq.startswith("\x1b[<") and (seq.endswith("~") or seq in ("\x1b[A", "\x1b[B", "\x1b[H", "\x1b[F", "\x1bOH", "\x1bOF", "\x1b[Z")):
+                if not seq.startswith("\x1b[<") and (seq.endswith("~") or seq in ("\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[H", "\x1b[F", "\x1bOH", "\x1bOF", "\x1b[Z")):
                     break
             return parse_escape_sequence(seq)
         except Exception:

@@ -44,6 +44,10 @@ class InputTests(unittest.TestCase):
     def test_shift_tab(self):
         self.assertEqual(parse_escape_sequence("\x1b[Z"), "SHIFT_TAB")
 
+    def test_left_right_arrows(self):
+        self.assertEqual(parse_escape_sequence("\x1b[D"), "LEFT")
+        self.assertEqual(parse_escape_sequence("\x1b[C"), "RIGHT")
+
     def test_plain_escape_and_ctrl_t_are_normalized(self):
         self.assertEqual(normalize_plain_key("\x1b"), "ESC")
         self.assertEqual(normalize_plain_key("\x14"), "CTRL_T")
