@@ -78,3 +78,5 @@ jobs:
           git add -A
           git commit -m "Harden self-update app selection and verification"
           git push origin HEAD:fix/update-app-selection-0.16.3
+
+# rerun after legacy updater fixtures were brought up to the verified-install contract
