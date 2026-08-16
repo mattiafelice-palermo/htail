@@ -27,6 +27,17 @@ jobs:
           fi
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
+      - name: Commit product patch
+        run: |
+          if git diff --quiet -- src; then
+            echo "no product patch to commit"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src
+            git commit -m "Implement htail 0.16 global search core"
+            git push origin HEAD:feature/global-search-redesign-0.16.0
+          fi
       - name: Run tests
         env:
           PYTHONPATH: src
@@ -41,14 +52,3 @@ jobs:
         run: |
           python /tmp/htail --version
           python /tmp/htail --bundle-self-test
-      - name: Commit product patch
-        run: |
-          if git diff --quiet -- src; then
-            echo "no product patch to commit"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src
-          git commit -m "Implement htail 0.16 global search core"
-          git push origin HEAD:feature/global-search-redesign-0.16.0
