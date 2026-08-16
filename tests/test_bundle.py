@@ -23,7 +23,6 @@ class BundleTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(ROOT / "tools" / "build_release.py"),
-                    "--no-vendor",
                     "--output",
                     str(out),
                 ],

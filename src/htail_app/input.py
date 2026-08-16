@@ -73,8 +73,6 @@ class InputReader:
 
     def __enter__(self) -> "InputReader":
         if os.name == "nt":
-            # msvcrt reads the console keyboard even when standard input is
-            # redirected in the usual Windows Terminal/Console setup.
             self.enabled = bool(sys.stdout.isatty())
             return self
 
@@ -85,8 +83,6 @@ class InputReader:
             if sys.stdin.isatty():
                 self._fd = sys.stdin.fileno()
             else:
-                # A pipeline owns fd 0. Use the controlling terminal for UI
-                # keys so `producer | ht` remains fully interactive.
                 self._owned_fd = os.open("/dev/tty", os.O_RDWR | getattr(os, "O_NOCTTY", 0))
                 self._fd = self._owned_fd
             self._old_termios = termios.tcgetattr(self._fd)
@@ -129,14 +125,28 @@ class InputReader:
         except OSError:
             return None
 
+    def _input_ready(self, timeout: float) -> bool:
+        if self._fd is None:
+            return False
+        try:
+            import select
+            ready, _, _ = select.select([self._fd], [], [], max(0.0, timeout))
+            return bool(ready)
+        except Exception:
+            return False
+
     def _read_escape_sequence(self, first: bytes) -> str:
         seq = first.decode("utf-8", errors="ignore")
-        deadline = time.monotonic() + 0.003
-        while time.monotonic() < deadline:
+        # ESC is both a complete key and an ANSI-sequence prefix. Never issue
+        # another blocking read unless select confirms continuation data.
+        deadline = time.monotonic() + 0.010
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._input_ready(remaining):
+                break
             byte = self._read_byte()
             if not byte:
-                time.sleep(0.0002)
-                continue
+                break
             seq += byte.decode("utf-8", errors="ignore")
             if seq.endswith(("~", "A", "B", "C", "D", "H", "F", "M", "m", "Z")):
                 break

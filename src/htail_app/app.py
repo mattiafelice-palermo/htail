@@ -879,15 +879,22 @@ class MultiApp:
         if key == self._global_search_cache_key:
             return
         self._global_search_cache_key = key
-        page = search_corpus(
-            corpus,
-            self.global_search_buffer,
-            self.global_search_mode,
-            self._global_search_flags(),
-            file_filter=self.global_search_file_filter,
-            sort_mode=self.global_search_sort,
-            limit=GLOBAL_SEARCH_LIMIT,
-        )
+        try:
+            page = search_corpus(
+                corpus,
+                self.global_search_buffer,
+                self.global_search_mode,
+                self._global_search_flags(),
+                file_filter=self.global_search_file_filter,
+                sort_mode=self.global_search_sort,
+                limit=GLOBAL_SEARCH_LIMIT,
+            )
+        except Exception as exc:
+            self.global_search_results = []
+            self.global_search_error = f"{type(exc).__name__}: {exc}"
+            self.global_search_truncated = False
+            self.global_search_selected = 0
+            return
         self.global_search_results = page.results
         self.global_search_error = page.error
         self.global_search_truncated = page.truncated
@@ -915,28 +922,38 @@ class MultiApp:
             file_label = f"[{self.panes[self.global_search_file_filter].name}]"
         else:
             file_label = "[All files]"
-        return render_global_search(
-            width,
-            height,
-            query=self.global_search_buffer,
-            mode=self.global_search_mode,
-            mode_labels=(
-                (SEARCH_SIMPLE, "Simple"),
-                (SEARCH_REGEX, "Regex"),
-                (SEARCH_BOOLEAN, "Boolean"),
-                (SEARCH_FUZZY, "Fuzzy"),
-            ),
-            ignore_case=self.global_search_ignore_case,
-            sort_mode=self.global_search_sort,
-            file_filter_label=file_label,
-            results=self.global_search_results,
-            selected=self.global_search_selected,
-            truncated=self.global_search_truncated,
-            error=self.global_search_error,
-            panes=self.panes,
-            preview_enabled=self.global_search_preview,
-            color=self.color,
-        )
+        try:
+            return render_global_search(
+                width,
+                height,
+                query=self.global_search_buffer,
+                mode=self.global_search_mode,
+                mode_labels=(
+                    (SEARCH_SIMPLE, "Simple"),
+                    (SEARCH_REGEX, "Regex"),
+                    (SEARCH_BOOLEAN, "Boolean"),
+                    (SEARCH_FUZZY, "Fuzzy"),
+                ),
+                ignore_case=self.global_search_ignore_case,
+                sort_mode=self.global_search_sort,
+                file_filter_label=file_label,
+                results=self.global_search_results,
+                selected=self.global_search_selected,
+                truncated=self.global_search_truncated,
+                error=self.global_search_error,
+                panes=self.panes,
+                preview_enabled=self.global_search_preview,
+                color=self.color,
+            )
+        except Exception as exc:
+            self.global_search_error = f"{type(exc).__name__}: {exc}"
+            return _panel_lines(
+                "Global search",
+                ["Search rendering error:", self.global_search_error, "", "Esc close"],
+                width,
+                height,
+                self.color,
+            )
 
     def _select_global_search_result(self) -> bool:
         self._refresh_global_search_results()
@@ -1096,17 +1113,33 @@ class MultiApp:
         def progress(stage: str, current: Optional[int], total: Optional[int]) -> None:
             self.update_install_status = stage
             self.update_install_progress = None if current is None else (current, total)
-            if stage.startswith("Downloading"):
+            if stage.startswith("Downloading release"):
                 if current is not None and total and total > 0:
-                    self.update_overall_progress = 0.05 + 0.70 * max(0.0, min(1.0, current / total))
+                    self.update_overall_progress = 0.03 + 0.37 * max(0.0, min(1.0, current / total))
                 else:
-                    self.update_overall_progress = max(self.update_overall_progress, 0.10)
-            elif stage.startswith("Verifying"):
-                self.update_overall_progress = max(self.update_overall_progress, 0.80)
+                    self.update_overall_progress = max(self.update_overall_progress, 0.08)
+            elif stage.startswith("Verifying release"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.42)
+            elif stage.startswith("Downloading runtime"):
+                if current is not None and total and total > 0:
+                    self.update_overall_progress = 0.45 + 0.30 * max(0.0, min(1.0, current / total))
+                else:
+                    self.update_overall_progress = max(self.update_overall_progress, 0.50)
+            elif stage.startswith("Verifying runtime"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.77)
+            elif stage.startswith("Unpacking runtime"):
+                if current is not None and total and total > 0:
+                    self.update_overall_progress = 0.80 + 0.14 * max(0.0, min(1.0, current / total))
+                else:
+                    self.update_overall_progress = max(self.update_overall_progress, 0.84)
+            elif stage.startswith("Runtime already"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.94)
+            elif stage.startswith("Unpacking application"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.95)
             elif stage.startswith("Backing up"):
-                self.update_overall_progress = max(self.update_overall_progress, 0.90)
-            elif stage.startswith("Installing") or stage.startswith("Replacing"):
                 self.update_overall_progress = max(self.update_overall_progress, 0.97)
+            elif stage.startswith("Installing") or stage.startswith("Replacing"):
+                self.update_overall_progress = max(self.update_overall_progress, 0.99)
             else:
                 self.update_overall_progress = max(self.update_overall_progress, 0.02)
             self.dirty = True
@@ -1420,10 +1453,12 @@ class MultiApp:
 
         key = event
         if self.update_confirm_active:
+            if self.update_installing:
+                return False
             if key in ("n", "N", "ESC", "q", "Q"):
                 self.update_confirm_active = False
                 self.set_message("update cancelled")
-            elif key in ("y", "Y") and self.update_release is not None and not self.update_installing:
+            elif key in ("y", "Y") and self.update_release is not None:
                 if self.args.commands:
                     self.update_confirm_active = False
                     self.set_message("update not installed during --exec; run 'ht --update' separately", 6.0)
@@ -1455,9 +1490,11 @@ class MultiApp:
             return False
 
         if self.help_active:
-            if key == "?":
+            if key in ("?", "ESC"):
                 self.help_active = False
                 self.dirty = True
+            elif key in ("q", "Q"):
+                return True
             return False
 
         if key == "?":
