@@ -28,17 +28,18 @@ jobs:
             python .github/patch_016.py
           fi
           python .github/finalize_016.py
+          python .github/docs_016.py
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
-      - name: Commit product patch
+      - name: Commit staged changes
         run: |
-          if git diff --quiet -- src; then
-            echo "no product patch to commit"
+          if git diff --quiet -- src README.md; then
+            echo "no staged product/doc patch to commit"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src
-            git commit -m "Harden htail 0.16 global search renderer"
+            git add src README.md
+            git commit -m "Finalize htail 0.16 global search UX"
             git push origin HEAD:feature/global-search-redesign-0.16.0
           fi
       - name: Run tests
