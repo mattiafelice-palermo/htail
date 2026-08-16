@@ -22,16 +22,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13"
 
       - name: Build standalone executable
-        run: python tools/build_release.py --output htail
+        run: python tools/build_release.py --output dist/htail
 
       - name: Resolve release version
         id: version
         shell: bash
         run: |
-          version="$(python htail --version | awk '{print $2}')"
+          version="$(python dist/htail --version | awk '{print $2}')"
           tag="v${version}"
           if [[ "$GITHUB_REF" == refs/tags/* ]] && [[ "$GITHUB_REF_NAME" != "$tag" ]]; then
             echo "HTAIL version $version does not match tag $GITHUB_REF_NAME" >&2
@@ -44,6 +44,14 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -v
+
+      - name: Compare invariant behavior with v0.9.0
+        env:
+          PYTHONPATH: src
+        run: python benchmarks/reference_compare.py --reference v0.9.0
+
+      - name: Smoke test bundled native dependencies
+        run: python dist/htail --bundle-self-test
 
       - name: Check existing release
         id: existing
@@ -58,48 +66,33 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Require version bump when bundle changed
+      - name: Require version bump when product source changed
         if: steps.existing.outputs.exists == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         shell: bash
         run: |
-          if ! git diff --quiet -- htail; then
-            echo "Generated executable changed but ${{ steps.version.outputs.tag }} already exists. Bump VERSION before publishing source changes." >&2
+          tag_commit="$(git rev-list -n 1 "$TAG")"
+          if ! git diff --quiet "$tag_commit"..HEAD -- src tools; then
+            echo "Product source changed but $TAG already exists. Bump VERSION before publishing source changes." >&2
             exit 1
           fi
-
-      - name: Commit generated executable
-        if: github.ref == 'refs/heads/main' && steps.existing.outputs.exists != 'true'
-        id: generated
-        shell: bash
-        run: |
-          if git diff --quiet -- htail; then
-            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add htail
-          git commit -m "Build htail ${{ steps.version.outputs.version }} executable"
-          git push origin HEAD:main
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release assets
         if: steps.existing.outputs.exists != 'true'
         run: |
-          chmod +x htail
-          sha256sum htail > htail.sha256
+          chmod +x dist/htail
+          sha256sum dist/htail > dist/htail.sha256
 
       - name: Create GitHub Release
         if: steps.existing.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-          TARGET_SHA: ${{ steps.generated.outputs.sha }}
         shell: bash
         run: |
-          target="${TARGET_SHA:-$(git rev-parse HEAD)}"
           gh release create "$TAG" \
-            --target "$target" \
+            --target "$(git rev-parse HEAD)" \
             --title "$TAG" \
             --notes-file RELEASE_NOTES.md \
-            htail htail.sha256
+            dist/htail dist/htail.sha256
