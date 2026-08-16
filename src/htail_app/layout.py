@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import List
+from typing import List, Optional, Sequence
 
 LAYOUTS = ("auto", "rows", "columns", "grid", "stream")
 
@@ -25,6 +25,25 @@ def _split(total: int, count: int) -> List[int]:
     return [base + (1 if i < extra else 0) for i in range(count)]
 
 
+def _weighted_split(total: int, count: int, weights: Optional[Sequence[float]]) -> List[int]:
+    if count <= 0:
+        return []
+    if weights is None or len(weights) != count:
+        return _split(total, count)
+    clean = [max(0.001, float(weight)) for weight in weights]
+    if total < count:
+        return _split(total, count)
+    remaining = total - count
+    weight_total = sum(clean)
+    raw = [(remaining * weight / weight_total) for weight in clean]
+    extras = [int(value) for value in raw]
+    left = remaining - sum(extras)
+    order = sorted(range(count), key=lambda index: raw[index] - extras[index], reverse=True)
+    for index in order[:left]:
+        extras[index] += 1
+    return [1 + extra for extra in extras]
+
+
 def resolve_auto(count: int, width: int, height: int) -> str:
     if count <= 1:
         return "rows"
@@ -34,7 +53,13 @@ def resolve_auto(count: int, width: int, height: int) -> str:
     return "grid"
 
 
-def pane_rects(layout: str, count: int, width: int, height: int) -> List[Rect]:
+def pane_rects(
+    layout: str,
+    count: int,
+    width: int,
+    height: int,
+    weights: Optional[Sequence[float]] = None,
+) -> List[Rect]:
     """Return non-overlapping pane rectangles covering the available body area."""
     if count <= 0 or width <= 0 or height <= 0:
         return []
@@ -44,7 +69,7 @@ def pane_rects(layout: str, count: int, width: int, height: int) -> List[Rect]:
         return [Rect(0, 0, width, height)]
 
     if layout == "rows":
-        heights = _split(height, count)
+        heights = _weighted_split(height, count, weights)
         y = 0
         out: List[Rect] = []
         for h in heights:
@@ -53,7 +78,7 @@ def pane_rects(layout: str, count: int, width: int, height: int) -> List[Rect]:
         return out
 
     if layout == "columns":
-        widths = _split(width, count)
+        widths = _weighted_split(width, count, weights)
         x = 0
         out = []
         for w in widths:

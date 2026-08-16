@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import subprocess
 import threading
@@ -32,6 +33,7 @@ class GitFileContext:
 class GitRemoteRef:
     remote: str
     branch: str
+    sha: Optional[str] = None
 
     @property
     def label(self) -> str:
@@ -84,25 +86,25 @@ def discover_git_file(path: Path) -> Optional[GitFileContext]:
     return GitFileContext(root=root, relative_path=relative, remotes=remotes)
 
 
-def _cached_remote_branches(context: GitFileContext, remote: str) -> List[str]:
+def _cached_remote_refs(context: GitFileContext, remote: str) -> List[GitRemoteRef]:
     result = _git(
         context.root,
         "for-each-ref",
-        "--format=%(refname:short)",
+        "--format=%(refname:short) %(objectname)",
         f"refs/remotes/{remote}",
     )
     if result.returncode != 0:
         return []
     prefix = remote + "/"
-    branches = []
+    refs: List[GitRemoteRef] = []
     for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line.startswith(prefix):
+        parts = line.strip().split(None, 1)
+        if not parts or not parts[0].startswith(prefix):
             continue
-        branch = line[len(prefix):]
+        branch = parts[0][len(prefix):]
         if branch and branch != "HEAD":
-            branches.append(branch)
-    return sorted(set(branches))
+            refs.append(GitRemoteRef(remote, branch, parts[1] if len(parts) == 2 else None))
+    return sorted(refs, key=lambda ref: ref.branch)
 
 
 def list_remote_refs(context: GitFileContext) -> Tuple[List[GitRemoteRef], Optional[str]]:
@@ -111,17 +113,19 @@ def list_remote_refs(context: GitFileContext) -> Tuple[List[GitRemoteRef], Optio
     warnings: List[str] = []
     for remote in context.remotes:
         result = _git(context.root, "ls-remote", "--heads", remote)
-        branches: List[str] = []
         if result.returncode == 0:
+            remote_refs: List[GitRemoteRef] = []
             for line in result.stdout.splitlines():
                 parts = line.split(None, 1)
                 if len(parts) != 2 or not parts[1].startswith("refs/heads/"):
                     continue
-                branches.append(parts[1][len("refs/heads/"):])
+                remote_refs.append(
+                    GitRemoteRef(remote, parts[1][len("refs/heads/"):], parts[0])
+                )
         else:
-            branches = _cached_remote_branches(context, remote)
+            remote_refs = _cached_remote_refs(context, remote)
             warnings.append(f"{remote}: {_failure(result, 'could not query remote branches')}")
-        refs.extend(GitRemoteRef(remote, branch) for branch in sorted(set(branches)))
+        refs.extend(sorted(remote_refs, key=lambda ref: ref.branch))
     return refs, "; ".join(warnings) if warnings else None
 
 
@@ -153,23 +157,36 @@ def _fetch_branch(
 ) -> str:
     if progress is not None:
         progress(f"Fetching Git objects for {remote}/{branch}…")
+    remote_key = hashlib.sha1(remote.encode("utf-8", errors="replace")).hexdigest()[:12]
+    target_ref = f"refs/htail/remotes/{remote_key}/{branch}"
     result = _git(
         context.root,
         "fetch",
         "--quiet",
         "--no-tags",
+        "--depth=1",
         remote,
-        f"refs/heads/{branch}",
+        f"+refs/heads/{branch}:{target_ref}",
         timeout=15.0,
     )
     if result.returncode != 0:
         raise GitRemoteError(_failure(result, f"could not fetch {remote}/{branch}"))
     if progress is not None:
         progress("Resolving fetched commit…")
-    resolved = _git(context.root, "rev-parse", "FETCH_HEAD")
+    resolved = _git(context.root, "rev-parse", target_ref)
     if resolved.returncode != 0:
         raise GitRemoteError(_failure(resolved, "could not resolve fetched commit"))
     return resolved.stdout.strip()
+
+
+def _commit_is_local(context: GitFileContext, sha: str) -> bool:
+    result = _git(
+        context.root,
+        "cat-file",
+        "-e",
+        f"{sha}^{{commit}}",
+    )
+    return result.returncode == 0
 
 
 def read_remote_snapshot(
@@ -183,8 +200,13 @@ def read_remote_snapshot(
 ) -> Tuple[str, List[str]]:
     """Fetch one remote branch and return the repository-relative file snapshot."""
     wanted_sha = expected_sha or remote_head_sha(context, remote, branch, progress=progress)
-    fetched_sha = _fetch_branch(context, remote, branch, progress=progress)
-    sha = fetched_sha or wanted_sha
+    if _commit_is_local(context, wanted_sha):
+        sha = wanted_sha
+        if progress is not None:
+            progress(f"Using cached Git objects for {remote}/{branch}…")
+    else:
+        fetched_sha = _fetch_branch(context, remote, branch, progress=progress)
+        sha = fetched_sha or wanted_sha
     if progress is not None:
         progress(f"Loading {context.relative_path} from {remote}/{branch}…")
     result = _git(
@@ -219,6 +241,7 @@ class GitRemoteFollower:
         args,
         *,
         check_interval: float = REMOTE_CHECK_INTERVAL,
+        initial_sha: Optional[str] = None,
     ) -> None:
         self.context = context
         self.remote = remote
@@ -229,6 +252,7 @@ class GitRemoteFollower:
         self.check_interval = max(1.0, check_interval)
         self.previous: List[str] = []
         self.remote_sha: Optional[str] = None
+        self.initial_sha = initial_sha
         self.initialized = False
         self.file_missing = False
         self.last_update_time: Optional[float] = None
@@ -263,12 +287,14 @@ class GitRemoteFollower:
                 self.remote,
                 self.branch,
                 self.args.encoding,
+                expected_sha=self.initial_sha,
                 progress=progress,
             )
         except GitRemoteError as exc:
             return WatchNotice("error", str(exc))
         self.previous = lines
         self.remote_sha = sha
+        self.initial_sha = None
         self.initialized = True
         self.file_missing = False
         self._last_error = None

@@ -446,6 +446,7 @@ class MultiApp:
         self.panes: List[Pane] = []
         self.stream = StreamPane(color, args.idle_warn)
         self.layout = args.layout
+        self._pane_layout_weights: Dict[str, List[float]] = {}
         self.focus = 0
         self.maximized = False
         self.layout_menu = False
@@ -668,7 +669,8 @@ class MultiApp:
             displayed = [(self.focus, self.panes[self.focus], rect)]
             self.last_rects = [(self.focus, rect)]
         else:
-            rects = pane_rects(self.layout, len(self.panes), width, height)
+            weights = self._layout_weights(self.layout, len(self.panes)) if self.layout in ("rows", "columns") else None
+            rects = pane_rects(self.layout, len(self.panes), width, height, weights)
             displayed = [(i, self.panes[i], rects[i]) for i in range(min(len(self.panes), len(rects))) if rects[i].width > 0 and rects[i].height > 0]
             self.last_rects = [(i, rect) for i, _, rect in displayed]
 
@@ -704,6 +706,46 @@ class MultiApp:
                 line += " " * (width - cursor)
             out.append(line)
         return out
+
+    def _layout_weights(self, layout: str, count: int) -> List[float]:
+        weights = list(self._pane_layout_weights.get(layout, []))
+        if len(weights) < count:
+            weights.extend([1.0] * (count - len(weights)))
+        elif len(weights) > count:
+            weights = weights[:count]
+        self._pane_layout_weights[layout] = weights
+        return weights
+
+    def _equalize_pane_sizes(self) -> None:
+        if self.layout not in ("rows", "columns") or len(self.panes) < 2:
+            self.set_message("pane resizing is available in Rows / Columns layouts")
+            return
+        self._pane_layout_weights[self.layout] = [1.0] * len(self.panes)
+        self.set_message("pane sizes equalized")
+        self.dirty = True
+
+    def _resize_focused_pane(self, delta: int) -> bool:
+        if self.layout not in ("rows", "columns") or len(self.panes) < 2 or delta == 0:
+            return False
+        width, height, _ = self.content_dimensions()
+        weights = self._layout_weights(self.layout, len(self.panes))
+        rects = pane_rects(self.layout, len(self.panes), width, height, weights)
+        if len(rects) != len(self.panes):
+            return False
+        index = min(max(0, self.focus), len(rects) - 1)
+        neighbor = index + 1 if index + 1 < len(rects) else index - 1
+        sizes = [rect.height if self.layout == "rows" else rect.width for rect in rects]
+        minimum = 4 if self.layout == "rows" else 16
+        if sizes[index] + delta < minimum or sizes[neighbor] - delta < minimum:
+            self.set_message("pane cannot be resized further", 2.0)
+            return True
+        sizes[index] += delta
+        sizes[neighbor] -= delta
+        self._pane_layout_weights[self.layout] = [float(size) for size in sizes]
+        axis = "height" if self.layout == "rows" else "width"
+        self.set_message(f"pane {index + 1} {axis}: {sizes[index]}", 1.5)
+        self.dirty = True
+        return True
 
     def _search_flags(self) -> int:
         return re.IGNORECASE if self.args.ignore_case else 0
@@ -841,6 +883,8 @@ class MultiApp:
             PaletteItem("Toggle CHANGES / TAIL follow mode", "follow"),
             PaletteItem("Clear active search", "clear-search"),
         ]
+        if self.layout in ("rows", "columns") and len(self.panes) > 1:
+            items.append(PaletteItem("Equalize pane sizes", "equalize-panes", detail=self.layout))
         if self._git_context_for_active_pane() is not None:
             items.append(PaletteItem("Switch file source…", "git-source", detail="local / remote Git branch"))
         items.extend(PaletteItem(f"Focus pane {i + 1}: {candidate.name}", "focus", i) for i, candidate in enumerate(self.panes))
@@ -947,7 +991,21 @@ class MultiApp:
             return
 
         remote, branch = value
-        follower = GitRemoteFollower(self._git_source_context, str(remote), str(branch), self.args)
+        selected_ref = next(
+            (
+                ref
+                for ref in self._git_source_refs
+                if ref.remote == str(remote) and ref.branch == str(branch)
+            ),
+            None,
+        )
+        follower = GitRemoteFollower(
+            self._git_source_context,
+            str(remote),
+            str(branch),
+            self.args,
+            initial_sha=selected_ref.sha if selected_ref is not None else None,
+        )
         notice = follower.initialize_if_available(progress=self._git_source_apply_progress)
         if notice.kind == "error":
             self._git_source_apply_result = GitSourceApplyResult(
@@ -1082,6 +1140,8 @@ class MultiApp:
         elif item.action == "clear-search":
             pane.set_search("", pane.search_flags, mode=pane.search_mode)
             pane.set_message("search cleared")
+        elif item.action == "equalize-panes":
+            self._equalize_pane_sizes()
         elif item.action == "focus":
             self.focus = int(item.value)
         elif item.action == "git-source-select":
@@ -1520,6 +1580,9 @@ class MultiApp:
             "Layout",
             "  l                  choose auto / rows / columns / grid / stream",
             "  z                  maximize focused pane / restore layout",
+            "  Ctrl+↑ / Ctrl+↓    shrink / grow focused pane in Rows layout",
+            "  Ctrl+← / Ctrl+→    shrink / grow focused pane in Columns layout",
+            "  : Equalize pane sizes resets Rows / Columns proportions",
             "",
             "Focused pane",
             "  :                  command palette / Markdown outline",
@@ -1530,7 +1593,7 @@ class MultiApp:
             "  n / N              next / previous committed local match",
             "  h                  set regex highlight; H clears it",
             "  ↑ ↓ / PgUp PgDn    vertical scroll",
-            "  ← →                horizontal scroll when wrap is off",
+            "  ← →                horizontal scroll when wrap is off / over wide Markdown tables",
             "  [ / ]              previous / next update",
             "  f                  freshest update",
             "  p                  pause/resume automatic jumps",
@@ -1562,6 +1625,7 @@ class MultiApp:
             "",
             "L / Esc  cancel",
             "Pane scroll positions and pause state are preserved.",
+            "Rows/Columns: Ctrl+arrows resize the focused pane.",
         ]
         return _panel_lines("Layout", content, width, height, self.color)
 
@@ -1697,7 +1761,8 @@ class MultiApp:
         elif self.update_release is not None:
             parts.append(f"UPDATE {self.update_release.version}")
         top = " · ".join(parts)
-        controls = ": commands · / search · g global · * selected · n/N match · Tab pane · ↑↓ scroll · ←→ hscroll · [/] update · f newest · u update · ? help"
+        resize_hint = " · Ctrl+arrows resize" if self.layout in ("rows", "columns") and len(self.panes) > 1 else ""
+        controls = ": commands · / search · g global · * selected · n/N match · Tab pane · ↑↓ scroll · ←→ hscroll" + resize_hint + " · [/] update · f newest · u update · ? help"
         return [top, controls]
 
     def _frame_rows(self) -> Tuple[int, List[str]]:
@@ -2067,6 +2132,12 @@ class MultiApp:
             else:
                 self.maximized = not self.maximized
                 self.dirty = True
+            return False
+        if key in ("CTRL_UP", "CTRL_DOWN") and self.layout == "rows":
+            self._resize_focused_pane(-1 if key == "CTRL_UP" else 1)
+            return False
+        if key in ("CTRL_LEFT", "CTRL_RIGHT") and self.layout == "columns":
+            self._resize_focused_pane(-2 if key == "CTRL_LEFT" else 2)
             return False
         if key == "TAB":
             self.focus_next(1)

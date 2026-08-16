@@ -1,3 +1,15 @@
+# htail 0.16.10
+
+## New features
+
+- Remote-backed panes now use a distinct border accent and a prominent `REMOTE <remote/branch>` title badge so it is immediately clear when a pane is no longer showing the local working tree.
+- Rendered Markdown now supports pipe tables with aligned columns and rendered separator rules. Table rows are never soft-wrapped; wide tables can be horizontally scrolled while ordinary Markdown remains wrapped.
+- Rows and Columns layouts can now be resized interactively: `Ctrl+Up` / `Ctrl+Down` shrink/grow the focused row, `Ctrl+Left` / `Ctrl+Right` shrink/grow the focused column, and the command palette can equalize pane sizes again.
+
+## Bug fixes
+
+- Initial Git source switches reuse the branch SHA already discovered by the source picker instead of performing a second `ls-remote`, reuse locally available commit objects when possible, and use a shallow private htail ref for the fallback fetch instead of fetching normal branch history into `FETCH_HEAD`.
+
 # htail 0.16.9
 
 ## New features

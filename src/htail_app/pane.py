@@ -213,7 +213,7 @@ class Pane:
             cache.popitem(last=False)
 
     def _wrap_cached(self, text: str, width: int) -> List[str]:
-        if not self.wrap_enabled:
+        if not self.wrap_enabled or self._is_markdown_table_visual(text):
             return [text]
         key = (max(1, width), text)
         cached = self._wrap_cache.get(key)
@@ -229,7 +229,10 @@ class Pane:
             return [line.rstrip("\r\n") for line in raw_visible]
         if self.highlighter.mode == "markdown-rendered":
             fence_re = re.compile(r"^\s*(?:```|~~~)")
-            if not any(fence_re.match(line.rstrip("\r\n")) for line in raw_visible):
+            if (
+                not any(fence_re.match(line.rstrip("\r\n")) for line in raw_visible)
+                and not self.highlighter._contains_markdown_table(raw_visible)
+            ):
                 rendered: List[str] = []
                 for raw in raw_visible:
                     body = raw.rstrip("\r\n")
@@ -242,6 +245,19 @@ class Pane:
                     rendered.append(cached)
                 return rendered
         return self.highlighter.render_lines(raw_visible)
+
+    @staticmethod
+    def _is_markdown_table_visual(text: str) -> bool:
+        plain = core.strip_ansi(text).strip()
+        numbered = re.match(r"^\d+\s+│\s+(?:▌\s+)?(.*)$", plain)
+        if numbered:
+            plain = numbered.group(1).strip()
+        elif plain.startswith("▌ "):
+            plain = plain[2:].strip()
+        return (
+            (plain.startswith("│") and plain.endswith("│") and plain.count("│") >= 2)
+            or (plain.startswith("├") and plain.endswith("┤") and "─" in plain)
+        )
 
     @staticmethod
     def _slice_ansi(text: str, start: int, width: int) -> str:
@@ -257,7 +273,9 @@ class Pane:
         return core.clip_ansi(text[raw:], width)
 
     def _viewport_row(self, row: str, width: int) -> str:
-        if not self.wrap_enabled and self.horizontal_offset:
+        if self.horizontal_offset and (
+            not self.wrap_enabled or self._is_markdown_table_visual(row)
+        ):
             row = self._slice_ansi(row, self.horizontal_offset, width)
         row = linkify_urls(row, self.color)
         return _pad_ansi(row, width)
@@ -831,11 +849,13 @@ class Pane:
         self.set_message("wrap on" if self.wrap_enabled else "wrap off · ←/→ scroll")
 
     def scroll_horizontal(self, delta: int, width: Optional[int] = None) -> None:
+        rows = self._snapshot_visual_lines if self.prefer_snapshot and self.snapshot_raw else self._visual_lines
         if self.wrap_enabled:
-            return
+            rows = [row for row in rows if self._is_markdown_table_visual(row)]
+            if not rows:
+                return
         target = max(0, self.horizontal_offset + delta)
         if width is not None:
-            rows = self._snapshot_visual_lines if self.prefer_snapshot and self.snapshot_raw else self._visual_lines
             max_width = max((len(core.strip_ansi(row)) for row in rows), default=0)
             target = min(target, max(0, max_width - max(1, width)))
         self.horizontal_offset = target
@@ -1010,14 +1030,14 @@ class Pane:
         else:
             state = "PAUSED" if self.paused else "LIVE"
         parts = [f"{index + 1}:{self.name}", state, self.follow_mode.upper()]
-        if self.source_label:
-            parts.append(self.source_label)
         if self.source_status:
             parts.append(self.source_status)
         if self.show_line_numbers:
             parts.append("LN")
         if not self.wrap_enabled:
             parts.append(f"NOWRAP ↔{self.horizontal_offset}")
+        elif self.horizontal_offset:
+            parts.append(f"TABLE ↔{self.horizontal_offset}")
         rate = self.rate_text(now)
         if rate:
             parts.append(rate)
@@ -1038,7 +1058,14 @@ class Pane:
         elif self.idle_warn > 0 and idle >= self.idle_warn:
             parts.append(f"⚠ {core.format_duration(idle)}")
         label = " · ".join(parts)
-        return core.paint(label, core.BOLD_LIGHT_CYAN if focused else core.DIM, self.color)
+        base = core.paint(label, core.BOLD_LIGHT_CYAN if focused else core.DIM, self.color)
+        if not self.source_label:
+            return base
+        remote_text = f"REMOTE {self.source_label}"
+        if self.color:
+            badge = core.paint(f" {remote_text} ", "\x1b[1;30;105m", True)
+            return badge + " · " + base
+        return f"[{remote_text}] · " + base
 
     def render_box(self, width: int, height: int, focused: bool, index: int) -> List[str]:
         width = max(1, width)
@@ -1060,7 +1087,10 @@ class Pane:
         remaining = max(1, width - 3 - visible)
         top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + "╮"
         if self.color:
-            border_style = core.BOLD_LIGHT_CYAN if focused else core.DIM
+            if self.source_label:
+                border_style = core.BOLD_LIGHT_MAGENTA if focused else core.MAGENTA
+            else:
+                border_style = core.BOLD_LIGHT_CYAN if focused else core.DIM
             top = core.paint("╭─", border_style, True) + title + core.paint("─" * remaining + "╮", border_style, True)
             side = core.paint("│", border_style, True)
         else:

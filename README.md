@@ -70,6 +70,8 @@ Interactive htail reads the **full current file** and initially positions each p
 
 Press `l` while htail is running to switch layout without restarting. Pane scroll positions, pause state, captured history, and unseen-update counts are preserved.
 
+In explicit `rows` / `columns` layouts, the focused pane can be resized without restarting: `Ctrl+↑` / `Ctrl+↓` shrink/grow a row and `Ctrl+←` / `Ctrl+→` shrink/grow a column. Use **Equalize pane sizes** from the command palette to restore equal proportions.
+
 ### Interactive controls
 
 | Key / input | Action |
@@ -86,6 +88,8 @@ Press `l` while htail is running to switch layout without restarting. Pane scrol
 | mouse wheel | Scroll the pane under the pointer |
 | `l` | Open the live layout chooser |
 | `z` | Maximize focused pane / restore layout |
+| `Ctrl+↑` / `Ctrl+↓` in Rows | Shrink / grow the focused pane |
+| `Ctrl+←` / `Ctrl+→` in Columns | Shrink / grow the focused pane |
 | `↑` / `↓` | Scroll focused pane one visual row |
 | `PgUp` / `PgDn` | Scroll focused pane one page |
 | `Home` / `End` | First line / bottom of focused pane |
@@ -124,7 +128,8 @@ Every pane starts at **EOF** on first open. In the default **CHANGES** follow mo
 
 - Timestamped and numbered update batches per file.
 - Highlighted new/replacement content with a persistent change gutter across wrapped rows.
-- Rendered Markdown headings, emphasis, lists, links, rules, and fenced code.
+- Rendered Markdown headings, emphasis, lists, links, rules, fenced code, and aligned pipe tables.
+- Markdown table rows never soft-wrap; wide tables use horizontal scrolling without disabling wrapping for surrounding prose.
 - Optional Pygments syntax highlighting for code and fenced blocks.
 - Soft wrapping with hanging indents for bullets, task lists, and numbered lists.
 - Per-pane pause, scrolling, search, regex highlighting, update navigation, idle state, and unseen-update counts.
@@ -200,7 +205,7 @@ See `docs/NEXT.md` for deliberately deferred ideas.
 
 Press `:` for the command palette. It includes a Markdown heading outline, per-pane wrap and line-number toggles, heartbeat configuration, follow mode, search clearing, search-selected/current-word, pane switching, and Git source switching when the selected file belongs to a repository with remotes. The outline jumps directly to headings in the current Markdown snapshot.
 
-For a local file inside a Git repository, choose **Switch file source…** to view the same repository-relative path from `origin/main` or another remote branch without typing the path again. Remote-backed pane titles show the selected `remote/branch`; the source picker marks **Local working tree** when the pane uses the normal local file. Remote-backed panes check the branch head periodically and use normal Git authentication/SSH/credential-helper configuration; choosing **Local working tree** switches the same pane back.
+For a local file inside a Git repository, choose **Switch file source…** to view the same repository-relative path from `origin/main` or another remote branch without typing the path again. Remote-backed panes use a distinct border accent and a prominent `REMOTE <remote/branch>` title badge; the source picker marks **Local working tree** when the pane uses the normal local file. Remote-backed panes check the branch head periodically and use normal Git authentication/SSH/credential-helper configuration; choosing **Local working tree** switches the same pane back. Initial source switches reuse the SHA already discovered by the picker and avoid fetching when the selected commit is already available locally.
 
 Search now has three modes: **Simple**, **Regex**, and **Boolean**. `Tab` cycles them. Boolean mode accepts `AND`, `OR`, `NOT`, parentheses, quoted phrases, and implicit AND; individual terms use the same friendly wildcard semantics as Simple search. `*` searches the active selected match, or a useful token at the current viewport when there is no selected match.
 
