@@ -1,0 +1,89 @@
+name: Diagnose published 0.16.1 -> 0.16.2 update
+
+on:
+  push:
+    branches:
+      - diagnose/0162-update-path
+    paths:
+      - .github/workflows/diagnose-0162-update.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Exercise published updater and inherited restart environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE="$RUNNER_TEMP/htail-cache"
+          mkdir -p "$RUNNER_TEMP/old"
+          gh release download v0.16.1 --repo mattiafelice-palermo/htail --pattern htail --dir "$RUNNER_TEMP/old" --clobber
+          cp "$RUNNER_TEMP/old/htail" "$RUNNER_TEMP/ht"
+          chmod +x "$RUNNER_TEMP/ht"
+
+          test "$(python "$RUNNER_TEMP/ht" --version)" = "htail 0.16.1"
+          XDG_CACHE_HOME="$CACHE" python "$RUNNER_TEMP/ht" --prepare-core
+          OLD_ENV="$(find "$CACHE/htail/0.16.1" -maxdepth 1 -type d -name 'env-*' -print -quit)"
+          test -n "$OLD_ENV"
+          OLD_APP="$OLD_ENV/app"
+
+          # This is the 0.16.1 updater replacing its own executable with the
+          # published latest release, while the old extracted app is present
+          # in inherited PYTHONPATH just as it is during an interactive run.
+          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$OLD_APP" python "$RUNNER_TEMP/ht" --update
+          test "$(python "$RUNNER_TEMP/ht" --version)" = "htail 0.16.2"
+
+          # The updated wrapper must prepare and select the new application,
+          # even when the old app path survives in the inherited environment.
+          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$OLD_APP" python "$RUNNER_TEMP/ht" --prepare-core
+          NEW_ENV="$(find "$CACHE/htail/0.16.2" -maxdepth 1 -type d -name 'env-*' -print -quit)"
+          test -n "$NEW_ENV"
+          NEW_APP="$NEW_ENV/app"
+          grep -F 'members[0][1].score is not None' "$NEW_APP/htail_app/global_search.py"
+          if grep -F 'members[0].score is not None' "$NEW_APP/htail_app/global_search.py"; then
+            echo 'published 0.16.2 extracted the stale renderer' >&2
+            exit 1
+          fi
+
+          # Launch the updated wrapper with the old app still inherited. Its
+          # own path ordering must select 0.16.2, not the stale 0.16.1 cache.
+          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$OLD_APP" python "$RUNNER_TEMP/ht" --bundle-self-test
+
+          PYTHONPATH="$NEW_APP:$OLD_APP" python - <<'PY'
+          from htail_app import VERSION
+          from htail_app.global_search import SORT_FILE, render_global_search
+          from htail_app.searching import GlobalSearchMatch, SEARCH_SIMPLE
+
+          assert VERSION == "0.16.2", VERSION
+          result = GlobalSearchMatch(0, 0, "coord.md", "2026 workflow", 0, 4, None)
+          rows = render_global_search(
+              120,
+              28,
+              query="2026",
+              mode=SEARCH_SIMPLE,
+              mode_labels=((SEARCH_SIMPLE, "Simple"),),
+              ignore_case=False,
+              sort_mode=SORT_FILE,
+              file_filter_label="[All files]",
+              results=[result],
+              selected=0,
+              truncated=False,
+              error=None,
+              panes=[],
+              preview_enabled=False,
+              color=True,
+          )
+          screen = "\n".join(rows)
+          assert "AttributeError" not in screen, screen
+          assert "coord.md" in screen, screen
+          print("published update path rendered grouped Simple search successfully")
+          PY
