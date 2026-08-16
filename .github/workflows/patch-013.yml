@@ -6,6 +6,7 @@ on:
       - feature/inline-search-ux-0.13.0
     paths:
       - .github/patch_013.py
+      - .github/patch_013_fix.py
       - .github/workflows/patch-013.yml
 
 permissions:
@@ -23,7 +24,7 @@ jobs:
         with:
           python-version: "3.x"
       - name: Apply patch
-        run: python .github/patch_013.py
+        run: python .github/patch_013_fix.py
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
       - name: Run tests
