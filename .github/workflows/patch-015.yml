@@ -6,6 +6,7 @@ on:
       - feature/htail-0.15.0
     paths:
       - .github/patch_015.py
+      - .github/patch_015_driver.py
       - .github/workflows/patch-015.yml
 
 permissions:
@@ -23,7 +24,7 @@ jobs:
         with:
           python-version: "3.x"
       - name: Apply implementation patch
-        run: python .github/patch_015.py
+        run: python .github/patch_015_driver.py
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
       - name: Run tests
