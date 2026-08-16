@@ -21,15 +21,18 @@ This file contains operational detail intentionally kept out of the root
 1. Start from the current repository state and create a purpose-specific
    branch. Use the current release number in feature/fix branch names when the
    change is release-bound; docs-only branches may stay on the current release.
-2. Read the relevant implementation and nearby tests before editing. Search for
-   existing helpers, state, rendering conventions, and input handling before
-   introducing a new path.
+2. Inspect what is relevant to the task before editing: implementation, nearby
+   tests, documentation, invariants, workflows, and release machinery as
+   applicable. Inspect enough to understand the blast radius and existing
+   conventions; do not optimize for the fewest files read, and do not spend
+   time exploring unrelated areas.
 3. Edit locally with targeted patches. Review both `git diff` and
    `git diff --check` while working.
 4. Add focused regression tests for behavior changes. Prefer tests that exercise
    the existing public/internal seam instead of duplicating implementation
    logic in the test.
-5. Run the local gate below before the first GitHub push that triggers CI.
+5. Run the applicable local gate below before the first GitHub push that
+   triggers CI.
 6. Push/publish only the final tested files. Keep the PR history clean; one
    coherent feature commit is preferred when practical.
 7. Wait for the complete PR CI gate. If it fails, fetch the failing job/log,
@@ -38,7 +41,17 @@ This file contains operational detail intentionally kept out of the root
 8. Merge normally after CI is green. For a versioned product change, verify the
    post-merge release workflow and resulting release/tag.
 
-## Local validation gate
+## Local validation gates
+
+Choose the gate from the actual changed paths and behavior, not from perceived
+change size.
+
+### Full gate
+
+Use the full gate for anything capable of changing application, build, test,
+benchmark, CI, or release behavior. This includes changes under `src/`,
+`tools/`, `tests/`, `benchmarks/`, `.github/workflows/`, and the `htail`
+launcher.
 
 Install the CI test dependency if the environment does not already have it:
 
@@ -46,7 +59,7 @@ Install the CI test dependency if the environment does not already have it:
 python -m pip install --disable-pip-version-check RapidFuzz==3.14.5
 ```
 
-Before any push that triggers CI, run at least:
+Before any push that triggers CI for such a change, run at least:
 
 ```bash
 python -m compileall -q src tools tests benchmarks
@@ -54,9 +67,8 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 git diff --check
 ```
 
-The full unit suite is mandatory even when the code change looks small. For a
-documentation-only change, still run the full suite; it is fast and keeps the
-workflow predictable.
+The full unit suite is mandatory for this gate even when the code change looks
+small.
 
 For product/release changes, also build and smoke-test the standalone wrapper:
 
@@ -76,6 +88,29 @@ If the local checkout was materialized from an archive and lacks Git tags, do
 not fabricate the reference result. Record that the invariant comparison is
 left to CI, which checks out full history/tags.
 
+### Documentation-only fast path
+
+A change is documentation-only only when it cannot alter runtime, build, test,
+CI, or release execution. Typical examples are `README.md`, `agent.md`,
+`AGENTS.md`, and Markdown files under `docs/`. A workflow/configuration/script
+change is **not** documentation-only just because its diff is mostly comments
+or prose.
+
+For a genuine documentation-only change, the local fast path is sufficient:
+
+```bash
+git diff --check
+```
+
+Also validate the documentation affected by the change: follow relative links,
+check referenced paths/commands against the repository, and verify any required
+heading/template conventions. Run a targeted script or test when the edited
+documentation is machine-consumed or when a repository check exists for it.
+
+Do not run the full application unit suite merely to prove that prose did not
+change Python behavior. The PR still goes through the repository's normal full
+CI gate before merge.
+
 ## GitHub transport when shell network is unavailable
 
 Implementation should still happen entirely in the local working tree. Once
@@ -91,6 +126,21 @@ Sending a final complete file blob is acceptable transport; repeatedly replacing
 whole files through the API while developing is not. Avoid temporary workflow
 files, encoded patch chunks, reconstruction jobs, or extra staging commits unless
 there is a demonstrated connector limitation that makes them unavoidable.
+
+For efficient connector use:
+
+- Reuse repository/branch/commit identifiers already established in the
+  session instead of repeatedly rediscovering them.
+- Batch independent reads or writes when the tooling safely supports it.
+- Prefer one final set of changed-file blobs, one tree, and one commit over a
+  sequence of per-file development commits.
+- Poll CI at a cadence appropriate to its normal runtime rather than in tight
+  loops.
+- After merge, wait for and verify a post-merge release workflow when the
+  change affects product source, versioning, build/release behavior, or when
+  explicitly requested. For a documentation-only change, confirming the merge
+  is normally sufficient; an unrelated release workflow need not block task
+  completion.
 
 ## CI and merge policy
 

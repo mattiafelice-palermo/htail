@@ -10,11 +10,14 @@ release procedure, and failure handling.
   edits (`apply_patch`, small replacements, normal editor operations) and
   inspect `git diff`. Do not develop by repeatedly reconstructing whole source
   files through a remote API.
-- Inspect the existing implementation, tests, and TUI patterns before adding
-  new abstractions. Reuse the current architecture where possible.
-- Run the full local unit suite before any push that can trigger GitHub CI.
-  Never push a known failure. If only a subset was run, say so explicitly and
-  do not describe it as the full suite.
+- Inspect the task-relevant implementation, tests, documentation, invariants,
+  and workflows far enough to understand the change and its blast radius.
+  Reuse the current architecture where possible; avoid unrelated exploration.
+- Use the validation gate appropriate to the files changed. Runtime/build/test/
+  release-behavior changes require the full local unit suite before any push
+  that can trigger GitHub CI. Genuine documentation-only changes may use the
+  docs-only fast path in `docs/AGENT_WORKFLOW.md`. Never push a known failure,
+  and report exactly which gate was run.
 - After local validation, publish the exact final tree efficiently: normally
   one feature commit and one PR. If the local shell cannot push to GitHub, it
   is fine to upload the final changed-file blobs/tree once through the GitHub
@@ -36,4 +39,7 @@ release procedure, and failure handling.
 
 Do not spend time retrying direct GitHub network access from the VM if it is
 unavailable. Use the connected GitHub tooling for repository reads/writes and
-keep implementation/testing local.
+keep implementation/testing local. Keep tool use proportionate to the task:
+batch independent operations when practical, avoid rediscovering connector
+capabilities already known in the session, and do not block on unrelated
+post-merge workflows.
