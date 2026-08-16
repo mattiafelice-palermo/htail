@@ -9,17 +9,17 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
+import shutil
 import sys
 import tempfile
 import textwrap
+import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "htail_app"
-BUNDLE_REQUIREMENTS = ROOT / "tools" / "bundle-requirements.txt"
-SUPPORTED_CPYTHON_ABIS = ("cp310", "cp311", "cp312", "cp313", "cp314")
-WHEEL_PLATFORM = "manylinux_2_28_x86_64"
+REQUIREMENTS = ROOT / "tools" / "bundle-requirements.txt"
+SUPPORTED_ABIS = ("cp310", "cp311", "cp312", "cp313", "cp314")
 _FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
 
 
@@ -31,113 +31,77 @@ def read_version() -> str:
     return match.group(1)
 
 
-def _write_deterministic(archive: zipfile.ZipFile, name: str, data: bytes, executable: bool = False) -> None:
+def runtime_id() -> str:
+    return hashlib.sha256(REQUIREMENTS.read_bytes()).hexdigest()
+
+
+def _write(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     info = zipfile.ZipInfo(name.replace(os.sep, "/"), _FIXED_ZIP_TIME)
     info.compress_type = zipfile.ZIP_DEFLATED
-    info.external_attr = ((0o755 if executable else 0o644) & 0xFFFF) << 16
+    info.external_attr = (0o644 & 0xFFFF) << 16
     archive.writestr(info, data)
 
 
-def _download_wheels(abi: str, root: Path) -> list[Path]:
-    target = root / abi
-    target.mkdir(parents=True, exist_ok=True)
-    pyver = abi.removeprefix("cp")
-    command = [
-        sys.executable,
-        "-m",
-        "pip",
-        "download",
-        "--disable-pip-version-check",
-        "--only-binary=:all:",
-        "--implementation=cp",
-        f"--python-version={pyver}",
-        f"--abi={abi}",
-        f"--platform={WHEEL_PLATFORM}",
-        "--dest",
-        str(target),
-        "--requirement",
-        str(BUNDLE_REQUIREMENTS),
-    ]
-    subprocess.run(command, check=True)
-    wheels = sorted(target.glob("*.whl"))
-    if not wheels:
-        raise SystemExit(f"bundle requirements produced no wheels for {abi}")
-    return wheels
-
-
-def build_payload(include_vendor: bool = True) -> bytes:
+def build_payload() -> bytes:
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        launcher = b"from htail_app.app import main\nraise SystemExit(main())\n"
-        _write_deterministic(archive, "launcher.py", launcher)
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        _write(archive, "launcher.py", b"from htail_app.app import main\nraise SystemExit(main())\n")
         for path in sorted(PACKAGE.rglob("*.py")):
-            _write_deterministic(archive, str(Path("app") / "htail_app" / path.relative_to(PACKAGE)), path.read_bytes())
-
-        requirements_text = BUNDLE_REQUIREMENTS.read_text(encoding="utf-8")
-        manifest = {
-            "format": 2,
-            "platform": "linux-x86_64",
-            "wheel_platform": WHEEL_PLATFORM,
-            "supported_cpython_abis": list(SUPPORTED_CPYTHON_ABIS),
-            "requirements_sha256": hashlib.sha256(requirements_text.encode("utf-8")).hexdigest(),
-            "vendor": {},
-        }
-        if include_vendor:
-            with tempfile.TemporaryDirectory(prefix="htail-wheels-") as td:
-                wheel_root = Path(td)
-                for abi in SUPPORTED_CPYTHON_ABIS:
-                    wheel_names = []
-                    seen_paths = set()
-                    for wheel in _download_wheels(abi, wheel_root):
-                        wheel_names.append(wheel.name)
-                        with zipfile.ZipFile(wheel) as package:
-                            for entry in sorted(package.infolist(), key=lambda item: item.filename):
-                                if entry.is_dir():
-                                    continue
-                                destination = str(Path("vendor") / abi / entry.filename)
-                                if destination in seen_paths:
-                                    raise SystemExit(f"duplicate bundled path for {abi}: {entry.filename}")
-                                seen_paths.add(destination)
-                                _write_deterministic(
-                                    archive,
-                                    destination,
-                                    package.read(entry.filename),
-                                    executable=bool((entry.external_attr >> 16) & 0o111),
-                                )
-                    manifest["vendor"][abi] = {"wheels": wheel_names}
-        _write_deterministic(archive, "bundle.json", json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
+            _write(archive, str(Path("app") / "htail_app" / path.relative_to(PACKAGE)), path.read_bytes())
+        _write(
+            archive,
+            "bundle.json",
+            json.dumps(
+                {
+                    "format": 3,
+                    "platform": "linux-x86_64",
+                    "runtime_id": runtime_id(),
+                    "supported_cpython_abis": list(SUPPORTED_ABIS),
+                },
+                indent=2,
+                sort_keys=True,
+            ).encode(),
+        )
     return buf.getvalue()
 
 
 def build_wrapper(version: str, payload: bytes) -> str:
     digest = hashlib.sha256(payload).hexdigest()
+    rid = runtime_id()
     encoded = base64.b64encode(payload).decode("ascii")
     chunks = "\n".join(f"    {chunk!r}," for chunk in textwrap.wrap(encoded, 100))
     return f'''#!/usr/bin/env python3
-# Generated release bundle. Source checkouts use the small repository launcher instead.
 HTAIL_VERSION = "{version}"
+HTAIL_RUNTIME_ID = "{rid}"
 _PAYLOAD_SHA256 = "{digest}"
 _PAYLOAD = (\n{chunks}\n)
 
 import base64
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
-import platform
 import shutil
 import sys
 import tempfile
+import urllib.request
 import zipfile
 
+_REPO = "mattiafelice-palermo/htail"
 
-def _extract_environment(payload: bytes) -> Path:
-    cache_root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "htail" / HTAIL_VERSION
-    cache_root.mkdir(parents=True, exist_ok=True)
-    target = cache_root / f"env-{{_PAYLOAD_SHA256[:16]}}"
+
+def _cache_root():
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "htail"
+
+
+def _extract_app(payload):
+    root = _cache_root() / HTAIL_VERSION
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / f"env-{{_PAYLOAD_SHA256[:16]}}"
     if target.is_dir():
         return target
-    temp = Path(tempfile.mkdtemp(prefix=".env-", dir=str(cache_root)))
+    temp = Path(tempfile.mkdtemp(prefix=".env-", dir=str(root)))
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             archive.extractall(temp)
@@ -152,6 +116,64 @@ def _extract_environment(payload: bytes) -> Path:
             shutil.rmtree(temp, ignore_errors=True)
 
 
+def _runtime_target(abi):
+    return _cache_root() / "runtime" / HTAIL_RUNTIME_ID / abi
+
+
+def _legacy_runtime(abi):
+    for candidate in sorted((_cache_root() / "0.16.0").glob(f"env-*/vendor/{{abi}}"), reverse=True):
+        if candidate.is_dir() and (candidate / "rapidfuzz").is_dir():
+            return candidate
+    return None
+
+
+def _install_runtime_bytes(content, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = Path(tempfile.mkdtemp(prefix=f".{{target.name}}-", dir=str(target.parent)))
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as outer:
+            manifest = json.loads(outer.read("runtime.json").decode("utf-8"))
+            if manifest.get("runtime_id") != HTAIL_RUNTIME_ID:
+                raise RuntimeError("runtime id does not match htail core")
+            for wheel_name in manifest.get("wheels", []):
+                with zipfile.ZipFile(io.BytesIO(outer.read("wheels/" + wheel_name))) as wheel:
+                    wheel.extractall(temp)
+        try:
+            os.replace(temp, target)
+        except OSError:
+            if not target.is_dir():
+                raise
+    finally:
+        if temp.exists():
+            shutil.rmtree(temp, ignore_errors=True)
+
+
+def _bootstrap_runtime(abi):
+    target = _runtime_target(abi)
+    if target.is_dir():
+        return target
+    legacy = _legacy_runtime(abi)
+    if legacy is not None:
+        return legacy
+    # Normal self-updates prepare this before restart. This path is only for
+    # fresh manual installs or recovery after the runtime cache was removed.
+    base = f"https://github.com/{{_REPO}}/releases/download/v{{HTAIL_VERSION}}/htail-runtime-{{abi}}.zip"
+    try:
+        print(f"htail: preparing native runtime {{abi}}…", file=sys.stderr)
+        with urllib.request.urlopen(base + ".sha256", timeout=10.0) as response:
+            checksum = response.read().decode("utf-8", errors="replace")
+        expected = next((part.lower() for part in checksum.split() if len(part) == 64), None)
+        with urllib.request.urlopen(base, timeout=20.0) as response:
+            content = response.read()
+        if expected and hashlib.sha256(content).hexdigest() != expected:
+            raise RuntimeError("runtime checksum verification failed")
+        _install_runtime_bytes(content, target)
+        return target
+    except Exception as exc:
+        print(f"htail: native runtime unavailable: {{exc}}", file=sys.stderr)
+        return target
+
+
 def _main():
     if sys.argv[1:] == ["--version"]:
         print(f"htail {{HTAIL_VERSION}}")
@@ -159,18 +181,17 @@ def _main():
     payload = base64.b64decode("".join(_PAYLOAD).encode("ascii"))
     if hashlib.sha256(payload).hexdigest() != _PAYLOAD_SHA256:
         raise SystemExit("htail: embedded application payload failed integrity verification")
-    env_dir = _extract_environment(payload)
-    app_dir = env_dir / "app"
+    env_dir = _extract_app(payload)
     abi = f"cp{{sys.version_info.major}}{{sys.version_info.minor}}"
-    vendor_dir = env_dir / "vendor" / abi
-    python_paths = [str(app_dir)]
-    if sys.platform.startswith("linux") and platform.machine().lower() in ("x86_64", "amd64") and vendor_dir.is_dir():
-        python_paths.insert(0, str(vendor_dir))
+    runtime = _bootstrap_runtime(abi)
+    paths = [str(env_dir / "app")]
+    if runtime.is_dir():
+        paths.insert(0, str(runtime))
     previous = os.environ.get("PYTHONPATH")
     if previous:
-        python_paths.append(previous)
+        paths.append(previous)
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    env["PYTHONPATH"] = os.pathsep.join(paths)
     env["HTAIL_EXECUTABLE"] = str(Path(sys.argv[0]).resolve())
     os.execve(sys.executable, [sys.executable, str(env_dir / "launcher.py"), *sys.argv[1:]], env)
 
@@ -183,10 +204,9 @@ if __name__ == "__main__":
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "dist" / "htail")
-    parser.add_argument("--no-vendor", action="store_true", help="development-only: omit bundled runtime dependencies")
     args = parser.parse_args()
     version = read_version()
-    wrapper = build_wrapper(version, build_payload(include_vendor=not args.no_vendor))
+    wrapper = build_wrapper(version, build_payload())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(wrapper, encoding="utf-8", newline="\n")
     args.output.chmod(0o755)
