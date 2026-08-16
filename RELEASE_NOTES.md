@@ -1,3 +1,15 @@
+# htail 0.16.16
+
+## New features
+
+- Columns and Grid layouts now use rectangular terminal damage writes for scoped scrolling, updating only the changed pane area instead of rewriting full physical terminal rows that include unchanged neighboring panes.
+- Full-width panes now use a verified terminal scroll-region fast path for pure vertical viewport shifts: htail scrolls only the pane body and redraws newly exposed rows plus any changed border/status rows.
+- The scroll benchmark now reports terminal fast-path row/byte traffic in addition to Python render-cache timings.
+
+## Bug fixes
+
+- Terminal scroll-region acceleration now validates old/new row overlap before using terminal scroll commands and automatically falls back to rectangular writes whenever the rendered viewport is not screen-equivalent.
+
 # htail 0.16.15
 
 ## New features

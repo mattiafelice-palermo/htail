@@ -35,9 +35,8 @@ This file records useful ideas that are **not part of the current release**. It 
 - **Large-file startup index** — optional byte-offset/line index or mmap-assisted startup for multi-GB files.
 - **Simplify the ANSI width/clip pipeline** — several rendering stages still defensively strip, clip, pad, and measure ANSI rows more than once. Once the new render caches are established, tighten those stage invariants and remove redundant scans without changing terminal output.
 - **Indexed update-title lookup** — `current_update_number()` still walks update records linearly while composing pane titles. Replace that with an indexed/bisect lookup so very long-running sessions do not accumulate title-render overhead.
-- **Rectangular pane-terminal updates** — when only one pane changes, write that pane's terminal rectangle directly instead of rebuilding changed physical terminal rows spanning neighboring columns. This is the next step beyond pane-box caching if profiling still shows terminal assembly/output overhead.
+- **Horizontal-margin scroll regions** — 0.16.16 uses native terminal scroll regions only for full-width panes and rectangular writes for Columns/Grid. A future optimization could evaluate DECSLRM/left-right margin capability detection to combine native scrolling with side-by-side panes without assuming terminal support.
 - **Native backends beyond Linux/Windows** — 0.10.0 adds Linux and Windows filesystem wakeups; macOS/BSD could gain kqueue/FSEvents rather than using the polling fallback.
-- **Terminal scroll-region optimization** — damage rendering and pane-box caching avoid recomputing unchanged panes, but a one-line viewport scroll can still change most physical rows inside the active pane. Terminal insert/delete-line or scroll-region operations could reduce that traffic further if they can be proven screen-equivalent.
 
 ## Traditional `tail` compatibility that is probably lower priority
 

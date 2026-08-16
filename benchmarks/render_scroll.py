@@ -9,10 +9,12 @@ varies by terminal/CPU; the ratio and cache counters are the stable signals.
 from __future__ import annotations
 
 import argparse
+import io
 from pathlib import Path
 import statistics
 import tempfile
 import time
+from unittest import mock
 
 from htail_app import app, core
 from htail_app import render_perf
@@ -74,6 +76,29 @@ def viewport_decoration_case(application, width: int, height: int, iterations: i
     return median_ms(cached_samples), median_ms(uncached_samples)
 
 
+def terminal_output_case(application, iterations: int):
+    output = io.StringIO()
+    application.dimensions = lambda: (180, 44)
+    with mock.patch("sys.stdout", output):
+        application.dirty = True
+        application.render()
+        output.seek(0)
+        output.truncate(0)
+        rows_before = application.terminal_fast_rows_written
+        bytes_before = application.terminal_fast_bytes_written
+        rect_before = application.terminal_rect_fast_paths
+        region_before = application.terminal_scroll_region_uses
+        for index in range(iterations):
+            application.handle_input("UP" if index % 2 == 0 else "DOWN")
+            application.render()
+    return {
+        "rows": application.terminal_fast_rows_written - rows_before,
+        "bytes": application.terminal_fast_bytes_written - bytes_before,
+        "rect": application.terminal_rect_fast_paths - rect_before,
+        "regions": application.terminal_scroll_region_uses - region_before,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--panes", type=int, default=4)
@@ -123,8 +148,27 @@ def main() -> int:
                 max(1, args.height - 2),
                 max(10, args.iterations // 5),
             )
+            terminal_columns = terminal_output_case(application, min(args.iterations, 100))
         finally:
             application.close_native_watch()
+
+        one_path = root / "single.log"
+        one_path.write_text(
+            "".join(f"row={line} https://example.invalid/{line} payload={'x' * 72}\n" for line in range(args.lines)),
+            encoding="utf-8",
+        )
+        one_ns = app.parse_args([
+            str(one_path),
+            "--layout", "rows",
+            "--no-native-watch",
+            "--no-color",
+            "--no-self-install-prompt",
+        ])
+        one = app.MultiApp(one_ns, args.color, core.DisplayFilter(), core.UpdateService(""))
+        try:
+            terminal_full_width = terminal_output_case(one, min(args.iterations, 100))
+        finally:
+            one.close_native_watch()
 
     speedup = forced["median_ms"] / max(scoped["median_ms"], 1e-9)
     print(f"panes={args.panes} lines/pane={args.lines} iterations={args.iterations}")
@@ -145,6 +189,18 @@ def main() -> int:
         f"viewport decoration/screen: cached={cached_viewport:.3f} ms · "
         f"uncached={uncached_viewport:.3f} ms · "
         f"speedup={uncached_viewport / max(cached_viewport, 1e-9):.2f}x"
+    )
+    column_frames = max(1, terminal_columns["rect"] + terminal_columns["regions"])
+    full_frames = max(1, terminal_full_width["rect"] + terminal_full_width["regions"])
+    print(
+        "terminal columns/grid fast path: "
+        f"rect={terminal_columns['rect']} · rows/frame={terminal_columns['rows'] / column_frames:.1f} · "
+        f"bytes/frame={terminal_columns['bytes'] / column_frames:.0f}"
+    )
+    print(
+        "terminal full-width fast path: "
+        f"scroll-regions={terminal_full_width['regions']} · rows/frame={terminal_full_width['rows'] / full_frames:.1f} · "
+        f"bytes/frame={terminal_full_width['bytes'] / full_frames:.0f}"
     )
     return 0
 
