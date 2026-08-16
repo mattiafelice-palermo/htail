@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -8,7 +8,8 @@ import time
 from typing import Dict, List, Optional, Pattern, Sequence, Tuple
 
 from . import core
-from .searching import SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label
+from .extras import linkify_urls
+from .searching import SEARCH_BOOLEAN, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label, simple_escape
 
 
 FOLLOW_CHANGES = "changes"
@@ -129,6 +130,7 @@ class Pane:
         color: bool,
         idle_warn: float,
         display_name: Optional[str] = None,
+        heartbeat_seconds: float = 0.0,
     ) -> None:
         self.path = path
         self.display_name = display_name
@@ -147,6 +149,12 @@ class Pane:
         self.missing = False
         self.message: Optional[str] = None
         self.message_until = 0.0
+        self.heartbeat_seconds = max(0.0, heartbeat_seconds)
+        self.source_status = ""
+        self.show_line_numbers = False
+        self.wrap_enabled = True
+        self.horizontal_offset = 0
+        self._activity = deque(maxlen=128)
 
         self._layout_dirty = True
         self._layout_width: Optional[int] = None
@@ -203,6 +211,8 @@ class Pane:
             cache.popitem(last=False)
 
     def _wrap_cached(self, text: str, width: int) -> List[str]:
+        if not self.wrap_enabled:
+            return [text]
         key = (max(1, width), text)
         cached = self._wrap_cache.get(key)
         if cached is not None:
@@ -230,6 +240,35 @@ class Pane:
                     rendered.append(cached)
                 return rendered
         return self.highlighter.render_lines(raw_visible)
+
+    @staticmethod
+    def _slice_ansi(text: str, start: int, width: int) -> str:
+        if start <= 0:
+            return core.clip_ansi(text, width)
+        visible = 0
+        raw = 0
+        while raw < len(text) and visible < start:
+            match = core.ANSI_RE.match(text, raw)
+            if match:
+                raw = match.end(); continue
+            raw += 1; visible += 1
+        return core.clip_ansi(text[raw:], width)
+
+    def _viewport_row(self, row: str, width: int) -> str:
+        row = linkify_urls(row, self.color)
+        if not self.wrap_enabled and self.horizontal_offset:
+            row = self._slice_ansi(row, self.horizontal_offset, width)
+        return _pad_ansi(row, width)
+
+    def _numbered_rows(self, row: str, width: int, number: Optional[int], total: int) -> List[str]:
+        if not self.show_line_numbers:
+            return self._wrap_cached(row, width)
+        digits = max(1, len(str(max(1, total))))
+        first = f"{number:>{digits}} │ " if number is not None else (" " * digits + " │ ")
+        cont = " " * digits + " │ "
+        content_width = max(1, width - len(first))
+        pieces = self._wrap_cached(row, content_width)
+        return [core.paint(first if i == 0 else cont, core.DIM, self.color) + piece for i, piece in enumerate(pieces)]
 
     def _apply_regex_marks(self, row: str, search_index: Optional[int] = None) -> str:
         if not self.color:
@@ -318,6 +357,38 @@ class Pane:
         # repaint the old and new selected lines.
         self._mark_layout_dirty()
         self._snapshot_layout_dirty = True
+
+    def selected_search_text(self) -> str:
+        """Return the active selected match, or a useful word at the viewport."""
+        lines = self.snapshot_raw if self.snapshot_raw else [core.strip_ansi(line) for line in self.lines]
+        if not lines:
+            return ""
+        index = self._search_last_target
+        if index is None:
+            if self.snapshot_raw and self._snapshot_visual_to_source:
+                pos = min(max(0, self._snapshot_top), len(self._snapshot_visual_to_source) - 1)
+                index = self._snapshot_visual_to_source[pos]
+            if index is None:
+                index = min(max(0, self._logical_at_top()), len(lines) - 1)
+        if index is None or index < 0 or index >= len(lines):
+            return ""
+        plain = lines[index].rstrip("\r\n")
+        if self.search_regex is not None and self._search_last_target == index:
+            match = self.search_regex.search(plain)
+            if match is not None and match.end() > match.start():
+                return match.group(0)
+        match = re.search(r"[A-Za-z0-9_./:@+-]+", plain)
+        return match.group(0) if match else plain.strip().split()[0] if plain.strip() else ""
+
+    def search_selected(self, width: int, body_height: int) -> bool:
+        selected = self.selected_search_text()
+        if not selected:
+            self.set_message("nothing selected to search")
+            return False
+        error = self.set_search(simple_escape(selected), self.search_flags, mode=SEARCH_SIMPLE)
+        if error is not None:
+            self.set_message(error); return False
+        return self.select_search_match(0, width, body_height)
 
     def set_highlight(self, expression: str, flags: int = 0) -> Optional[str]:
         if not expression:
@@ -477,7 +548,8 @@ class Pane:
 
         for logical_index, line in enumerate(self.lines):
             self._logical_to_visual.append(len(self._visual_lines))
-            wrapped = self._wrap_cached(self._apply_regex_marks(line, logical_index), width)
+            marked = self._apply_regex_marks(line, logical_index)
+            wrapped = self._numbered_rows(marked, width, logical_index + 1, len(self.lines))
             self._visual_lines.extend(wrapped)
             self._visual_to_logical.extend([logical_index] * len(wrapped))
 
@@ -554,7 +626,7 @@ class Pane:
             changed = source_index in self.snapshot_changed
             if changed and self.snapshot_update_header and not header_inserted:
                 anchor = len(visual)
-                header_rows = self._wrap_cached(self.snapshot_update_header, width)
+                header_rows = self._numbered_rows(self.snapshot_update_header, width, None, len(self.snapshot_raw))
                 visual.extend(header_rows)
                 self._snapshot_visual_to_source.extend([None] * len(header_rows))
                 header_inserted = True
@@ -562,13 +634,13 @@ class Pane:
                 row = core.paint("▌ ", core.BOLD_LIGHT_CYAN, self.color) + row
             row = self._apply_regex_marks(row, source_index)
             self._snapshot_source_to_visual[source_index] = len(visual)
-            wrapped_rows = self._wrap_cached(row, width)
+            wrapped_rows = self._numbered_rows(row, width, source_index + 1, len(self.snapshot_raw))
             visual.extend(wrapped_rows)
             self._snapshot_visual_to_source.extend([source_index] * len(wrapped_rows))
 
         if self.snapshot_update_header and not header_inserted:
             anchor = len(visual)
-            header_rows = self._wrap_cached(self.snapshot_update_header, width)
+            header_rows = self._numbered_rows(self.snapshot_update_header, width, None, len(self.snapshot_raw))
             visual.extend(header_rows)
             self._snapshot_visual_to_source.extend([None] * len(header_rows))
 
@@ -594,7 +666,7 @@ class Pane:
         self._ensure_snapshot_layout(width)
         self._snapshot_top = min(max(0, self._snapshot_top), self._snapshot_max_top(height))
         rows = self._snapshot_visual_lines[self._snapshot_top : self._snapshot_top + height]
-        return [_pad_ansi(row, width) for row in rows] + [" " * width] * max(0, height - len(rows))
+        return [self._viewport_row(row, width) for row in rows] + [" " * width] * max(0, height - len(rows))
 
     def _viewport_counts(self, body_height: int) -> Tuple[int, int]:
         if self.prefer_snapshot and self.snapshot_raw:
@@ -692,6 +764,52 @@ class Pane:
         now = time.monotonic() if now is None else now
         base = self.last_update_monotonic if self.last_update_monotonic is not None else self.watch_started_monotonic
         return max(0.0, now - base)
+
+    def record_activity(self, line_count: int, byte_count: int, now: float) -> None:
+        self._activity.append((now, max(0, line_count), max(0, byte_count)))
+
+    def rate_text(self, now: Optional[float] = None) -> str:
+        now = time.monotonic() if now is None else now
+        recent = [sample for sample in self._activity if now - sample[0] <= 5.0]
+        if not recent:
+            return ""
+        lines = sum(sample[1] for sample in recent)
+        bytes_ = sum(sample[2] for sample in recent)
+        span = max(1.0, min(5.0, now - recent[0][0] + 1.0))
+        line_rate = lines / span
+        byte_rate = bytes_ / span
+        if line_rate < 0.05 and byte_rate < 1.0:
+            return ""
+        if byte_rate >= 1024 * 1024:
+            btext = f"{byte_rate / (1024*1024):.1f}MB/s"
+        elif byte_rate >= 1024:
+            btext = f"{byte_rate / 1024:.1f}KB/s"
+        else:
+            btext = f"{byte_rate:.0f}B/s"
+        return f"{line_rate:.1f}L/s · {btext}"
+
+    def cycle_heartbeat(self) -> None:
+        values = [0.0, 30.0, 60.0, 300.0, 600.0]
+        current = min(range(len(values)), key=lambda i: abs(values[i] - self.heartbeat_seconds))
+        self.heartbeat_seconds = values[(current + 1) % len(values)]
+        self.set_message("heartbeat off" if self.heartbeat_seconds == 0 else f"heartbeat {core.format_duration(self.heartbeat_seconds)}")
+
+    def toggle_line_numbers(self) -> None:
+        self.show_line_numbers = not self.show_line_numbers
+        self._mark_layout_dirty(); self._snapshot_layout_dirty = True
+        self.set_message("line numbers on" if self.show_line_numbers else "line numbers off")
+
+    def toggle_wrap(self) -> None:
+        self.wrap_enabled = not self.wrap_enabled
+        if self.wrap_enabled:
+            self.horizontal_offset = 0
+        self._mark_layout_dirty(); self._snapshot_layout_dirty = True
+        self.set_message("wrap on" if self.wrap_enabled else "wrap off · ←/→ scroll")
+
+    def scroll_horizontal(self, delta: int) -> None:
+        if self.wrap_enabled:
+            return
+        self.horizontal_offset = max(0, self.horizontal_offset + delta)
 
     def toggle_follow_mode(self) -> None:
         self._startup_follow_eof = False
@@ -838,7 +956,7 @@ class Pane:
         self._apply_initial_bottom(height)
         self.top = min(max(0, self.top), self._max_top(height))
         rows = self._visual_lines[self.top : self.top + height]
-        return [_pad_ansi(row, width) for row in rows] + [" " * width] * max(0, height - len(rows))
+        return [self._viewport_row(row, width) for row in rows] + [" " * width] * max(0, height - len(rows))
 
     def current_update_number(self) -> Optional[int]:
         if self.prefer_snapshot and self.updates:
@@ -863,6 +981,15 @@ class Pane:
         else:
             state = "PAUSED" if self.paused else "LIVE"
         parts = [f"{index + 1}:{self.name}", state, self.follow_mode.upper()]
+        if self.source_status:
+            parts.append(self.source_status)
+        if self.show_line_numbers:
+            parts.append("LN")
+        if not self.wrap_enabled:
+            parts.append(f"NOWRAP ↔{self.horizontal_offset}")
+        rate = self.rate_text(now)
+        if rate:
+            parts.append(rate)
         current = self.current_update_number()
         if current is not None:
             parts.append(f"U{current}")
@@ -875,7 +1002,9 @@ class Pane:
             if below:
                 parts.append(f"↓{below}")
         idle = self.idle_seconds(now)
-        if self.idle_warn > 0 and idle >= self.idle_warn:
+        if self.heartbeat_seconds > 0 and idle >= self.heartbeat_seconds:
+            parts.append(f"⚠ LATE {core.format_duration(idle - self.heartbeat_seconds)}")
+        elif self.idle_warn > 0 and idle >= self.idle_warn:
             parts.append(f"⚠ {core.format_duration(idle)}")
         label = " · ".join(parts)
         return core.paint(label, core.BOLD_LIGHT_CYAN if focused else core.DIM, self.color)

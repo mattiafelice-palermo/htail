@@ -188,3 +188,18 @@ PYTHONPATH=src python benchmarks/reference_compare.py --reference v0.9.0
 The reference probe runs the same deterministic file/diff/pane/terminal scenarios against the published tag and the candidate. It requires exact equality for the invariant application state and content-area terminal result; intentionally changed release/footer controls are outside that invariant. It also reports same-machine performance ratios for idle file polling and terminal redraw traffic. Absolute timings depend on storage and VM hardware, so ratios from the same machine are the useful metric.
 
 See `docs/NEXT.md` for deliberately deferred ideas.
+
+
+### 0.15 inspection and source features
+
+Press `:` for the command palette. It includes a Markdown heading outline, per-pane wrap and line-number toggles, heartbeat configuration, follow mode, search clearing, search-selected/current-word, and pane switching. The outline jumps directly to headings in the current Markdown snapshot.
+
+Search now has three modes: **Simple**, **Regex**, and **Boolean**. `Tab` cycles them. Boolean mode accepts `AND`, `OR`, `NOT`, parentheses, quoted phrases, and implicit AND; individual terms use the same friendly wildcard semantics as Simple search. `*` searches the active selected match, or a useful token at the current viewport when there is no selected match.
+
+Wrap is per pane. With wrap disabled, `←` / `→` scroll horizontally and the pane title reports the horizontal offset. Line numbers are also per pane and can be toggled from the command palette.
+
+`--heartbeat 5m` sets an expected update interval. A source that exceeds it is marked `LATE`; per-pane heartbeat can be cycled from the command palette. Active sources also show a rolling line/byte rate. `--exec` and `--ssh` panes display PID, runtime, and exit status.
+
+Compressed `.gz`, `.bz2`, `.xz`, and `.lzma` files can be opened directly as **static** sources. Remote files can be followed with the system OpenSSH client using `--ssh user@host:/path` or `--ssh ssh://user@host/path`; existing SSH config, keys, agents, ProxyJump, and host-key policy remain owned by OpenSSH.
+
+Visible `http://` and `https://` URLs are emitted as OSC-8 terminal hyperlinks, so supporting terminals can open them directly (typically Ctrl/Cmd-click depending on the terminal).

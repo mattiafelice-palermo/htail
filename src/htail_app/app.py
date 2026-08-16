@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
@@ -21,8 +22,9 @@ from .fsnotify import FsEvents, NativeWatchHub
 from .globwatch import DynamicGlob, has_magic
 from .layout import LAYOUTS, Rect, pane_rects, resolve_auto
 from .pane import Pane, StreamPane
-from .searching import GlobalSearchMatch, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, preview_around_match, search_label
-from .sources import CommandFollower, StreamFollower
+from .extras import is_compressed_path, markdown_outline, parse_duration, syntax_path_for_source
+from .searching import GlobalSearchMatch, SEARCH_BOOLEAN, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, preview_around_match, search_label
+from .sources import CommandFollower, CompressedFollower, SSHFollower, StreamFollower
 from .watcher import FileFollower, WatchNotice, WatchUpdate
 
 # The reusable core is copied from the previous single-file implementation.
@@ -34,6 +36,14 @@ INTERACTIVE_FRAME_INTERVAL = 1.0 / 60.0
 MIN_UPDATE_MODAL_SECONDS = 0.60
 MIN_UPDATE_COMPLETE_SECONDS = 0.35
 GLOBAL_SEARCH_LIMIT = 250
+
+
+@dataclass(frozen=True)
+class PaletteItem:
+    label: str
+    action: str
+    value: object = None
+    detail: str = ""
 
 
 def executable_path() -> Path:
@@ -53,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("files", type=Path, nargs="*", help="text files or quoted glob patterns to watch; use '-' for stdin")
     parser.add_argument("--glob", dest="globs", action="append", default=[], metavar="PATTERN", help="dynamically add files matching PATTERN; repeatable")
     parser.add_argument("--exec", dest="commands", action="append", default=[], metavar="COMMAND", help="run a shell command and watch its merged stdout/stderr; repeatable")
+    parser.add_argument("--ssh", dest="ssh_sources", action="append", default=[], metavar="SOURCE", help="follow remote SOURCE via OpenSSH: user@host:/path or ssh://host/path; repeatable")
     parser.add_argument("--pid", type=int, metavar="PID", help="exit after this process is no longer running")
     parser.add_argument("--install", nargs="?", const=core.DEFAULT_INSTALL_COMMAND, metavar="NAME")
     parser.add_argument("--no-self-install-prompt", action="store_true")
@@ -72,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exclude", metavar="REGEX")
     parser.add_argument("-I", "--ignore-case", action="store_true")
     parser.add_argument("--idle-warn", type=float, default=300.0, metavar="SECONDS")
+    parser.add_argument("--heartbeat", type=parse_duration, default=0.0, metavar="DURATION", help="expected update heartbeat, e.g. 30s, 5m, 1h or off")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-start-banner", action="store_true")
     parser.add_argument(
@@ -407,6 +419,11 @@ class MultiApp:
         self.global_search_selected = 0
         self.global_search_error: Optional[str] = None
         self.global_search_truncated = False
+        self.palette_active = False
+        self.palette_mode = "commands"
+        self.palette_buffer = ""
+        self.palette_selected = 0
+        self.palette_items: List[PaletteItem] = []
         self._last_frame: Optional[List[str]] = None
         self._last_frame_geometry: Optional[Tuple[int, int]] = None
         self.render_rows_written = 0
@@ -416,12 +433,12 @@ class MultiApp:
             if str(path) == "-":
                 pseudo = Path("stdin.txt")
                 highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
-                pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name="stdin")
+                pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name="stdin", heartbeat_seconds=args.heartbeat)
                 follower = StreamFollower(sys.stdin, args, label="stdin")
             else:
-                highlighter = core.SyntaxHighlighter(path, args.syntax, color)
-                pane = Pane(path, highlighter, display_filter, color, args.idle_warn)
-                follower = FileFollower(path, args)
+                highlighter = core.SyntaxHighlighter(syntax_path_for_source(path), args.syntax, color)
+                pane = Pane(path, highlighter, display_filter, color, args.idle_warn, heartbeat_seconds=args.heartbeat)
+                follower = CompressedFollower(path, args) if is_compressed_path(path) else FileFollower(path, args)
             notice = follower.initialize_if_available()
             if notice and notice.initial_tail is not None:
                 pane.add_initial(notice.initial_tail)
@@ -438,7 +455,8 @@ class MultiApp:
             self.followers.append(follower)
             if str(path) != "-":
                 self._known_file_paths.add(Path(os.path.abspath(os.fspath(path))))
-                self.native_watch.add_file(path)
+                if isinstance(follower, FileFollower):
+                    self.native_watch.add_file(path)
 
         for command_index, command in enumerate(args.commands, start=1):
             pseudo = Path(f"command-{command_index}.log")
@@ -451,13 +469,23 @@ class MultiApp:
             self.panes.append(pane)
             self.followers.append(follower)
 
+        for source in args.ssh_sources:
+            follower = SSHFollower(source, args)
+            pseudo = Path("ssh.log")
+            highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
+            pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=follower.label, heartbeat_seconds=args.heartbeat)
+            follower.initialize_if_available()
+            pane.set_message(f"connected process pid {follower.process.pid}", 4.0)
+            self.panes.append(pane)
+            self.followers.append(follower)
+
     def _add_dynamic_file(self, path: Path) -> bool:
         normalized = Path(os.path.abspath(os.fspath(path)))
         if normalized in self._known_file_paths:
             return False
-        highlighter = core.SyntaxHighlighter(path, self.args.syntax, self.color)
-        pane = Pane(path, highlighter, self.display_filter, self.color, self.args.idle_warn)
-        follower = FileFollower(path, self.args)
+        highlighter = core.SyntaxHighlighter(syntax_path_for_source(path), self.args.syntax, self.color)
+        pane = Pane(path, highlighter, self.display_filter, self.color, self.args.idle_warn, heartbeat_seconds=self.args.heartbeat)
+        follower = CompressedFollower(path, self.args) if is_compressed_path(path) else FileFollower(path, self.args)
         notice = follower.initialize_if_available()
         if notice and notice.initial_tail is not None:
             pane.add_initial(notice.initial_tail)
@@ -474,7 +502,8 @@ class MultiApp:
         self.panes.append(pane)
         self.followers.append(follower)
         self._known_file_paths.add(normalized)
-        self.native_watch.add_file(path)
+        if isinstance(follower, FileFollower):
+            self.native_watch.add_file(path)
         self.set_message(f"glob added {pane.name}", 4.0)
         return True
 
@@ -593,11 +622,11 @@ class MultiApp:
 
     @staticmethod
     def _other_search_mode(mode: str) -> str:
-        return SEARCH_REGEX if mode == SEARCH_SIMPLE else SEARCH_SIMPLE
+        return {SEARCH_SIMPLE: SEARCH_REGEX, SEARCH_REGEX: SEARCH_BOOLEAN, SEARCH_BOOLEAN: SEARCH_SIMPLE}.get(mode, SEARCH_SIMPLE)
 
     @staticmethod
     def _search_mode_name(mode: str) -> str:
-        return "Simple" if mode == SEARCH_SIMPLE else "Regex"
+        return {SEARCH_SIMPLE: "Simple", SEARCH_REGEX: "Regex", SEARCH_BOOLEAN: "Boolean"}.get(mode, mode.title())
 
     def _preview_local_search(self) -> None:
         if self.prompt_mode != "search":
@@ -680,6 +709,99 @@ class MultiApp:
         content = left_plain + (" " * gap) + suffix_plain
         return _pad("│" + _pad(content, inner) + "│", width)
 
+    def _palette_all_items(self) -> List[PaletteItem]:
+        pane = self.active_pane()
+        if self.palette_mode == "outline":
+            return [
+                PaletteItem(("  " * max(0, entry.level - 1)) + f"{entry.text}", "outline-jump", entry.source_index, f"line {entry.source_index + 1}")
+                for entry in markdown_outline(pane.snapshot_raw)
+            ]
+        items = [
+            PaletteItem("Markdown outline", "outline", detail="jump to a heading"),
+            PaletteItem("Toggle wrap", "wrap", detail="wrap / horizontal scrolling"),
+            PaletteItem("Toggle line numbers", "line-numbers"),
+            PaletteItem("Cycle expected heartbeat", "heartbeat", detail="off → 30s → 1m → 5m → 10m"),
+            PaletteItem("Search selected match / current word", "search-selected"),
+            PaletteItem("Toggle CHANGES / TAIL follow mode", "follow"),
+            PaletteItem("Clear active search", "clear-search"),
+        ]
+        items.extend(PaletteItem(f"Focus pane {i + 1}: {candidate.name}", "focus", i) for i, candidate in enumerate(self.panes))
+        return items
+
+    @staticmethod
+    def _palette_matches(label: str, query: str) -> bool:
+        words = [word.lower() for word in query.split() if word]
+        target = label.lower()
+        return all(word in target for word in words)
+
+    def _refresh_palette(self) -> None:
+        all_items = self._palette_all_items()
+        self.palette_items = [item for item in all_items if self._palette_matches(item.label + " " + item.detail, self.palette_buffer)]
+        if self.palette_items:
+            self.palette_selected = min(max(0, self.palette_selected), len(self.palette_items) - 1)
+        else:
+            self.palette_selected = 0
+
+    def _open_palette(self) -> None:
+        self.palette_active = True
+        self.palette_mode = "commands"
+        self.palette_buffer = ""
+        self.palette_selected = 0
+        self._refresh_palette()
+        self.dirty = True
+
+    def _execute_palette_item(self) -> None:
+        self._refresh_palette()
+        if not self.palette_items:
+            return
+        item = self.palette_items[self.palette_selected]
+        pane = self.active_pane()
+        inner_w, body_h = self._active_pane_geometry()
+        if item.action == "outline":
+            self.palette_mode = "outline"; self.palette_buffer = ""; self.palette_selected = 0; self._refresh_palette()
+            if not self.palette_items:
+                self.set_message("no Markdown headings found")
+                self.palette_active = False
+            return
+        if item.action == "outline-jump":
+            pane.jump_to_source_line(int(item.value), inner_w, body_h)
+        elif item.action == "wrap":
+            pane.toggle_wrap()
+        elif item.action == "line-numbers":
+            pane.toggle_line_numbers()
+        elif item.action == "heartbeat":
+            pane.cycle_heartbeat()
+        elif item.action == "search-selected":
+            pane.search_selected(inner_w, body_h)
+        elif item.action == "follow":
+            pane.toggle_follow_mode()
+        elif item.action == "clear-search":
+            pane.set_search("", pane.search_flags, mode=pane.search_mode)
+            pane.set_message("search cleared")
+        elif item.action == "focus":
+            self.focus = int(item.value)
+        self.palette_active = False
+        self.dirty = True
+
+    def _palette_lines(self, width: int, height: int) -> List[str]:
+        self._refresh_palette()
+        title = "Markdown outline" if self.palette_mode == "outline" else "Command palette"
+        content = [core.paint("> " + self.palette_buffer + "▌", core.BOLD_LIGHT_CYAN, self.color), ""]
+        if not self.palette_items:
+            content.append(core.paint("No matches", core.DIM, self.color))
+        else:
+            start = max(0, min(self.palette_selected - 5, max(0, len(self.palette_items) - 10)))
+            for index, item in enumerate(self.palette_items[start:start + 10], start=start):
+                prefix = "› " if index == self.palette_selected else "  "
+                row = prefix + item.label
+                if item.detail:
+                    row += "  ·  " + item.detail
+                if index == self.palette_selected:
+                    row = core.paint(row, "\x1b[1;30;106m", self.color)
+                content.append(row)
+        content.extend(["", "↑/↓ select · Enter apply · Esc close · type to filter"])
+        return _panel_lines(title, content, width, height, self.color)
+
     def _prompt_lines(self, width: int, height: int) -> List[str]:
         mode = self.prompt_mode or "search"
         if mode == "search":
@@ -692,8 +814,10 @@ class MultiApp:
             ]
             if self.prompt_search_mode == SEARCH_SIMPLE:
                 content.append("Simple: ordinary text is literal · * any text · ? one character")
-            else:
+            elif self.prompt_search_mode == SEARCH_REGEX:
                 content.append("Regex: Python regular-expression syntax")
+            else:
+                content.append("Boolean: AND / OR / NOT, parentheses and quoted phrases; terms use Simple semantics")
             content.extend(["", "Enter apply · Esc cancel · Backspace edit"])
             return _panel_lines(title, content, width, height, self.color)
 
@@ -749,16 +873,18 @@ class MultiApp:
         count_label = f"{count}+ matches" if self.global_search_truncated else f"{count} match{'es' if count != 1 else ''}"
         content: List[str] = [
             core.paint("> " + self.global_search_buffer, core.BOLD_LIGHT_CYAN, self.color),
-            f"Mode: {mode_name} · Tab toggles Simple / Regex · {count_label}",
+            f"Mode: {mode_name} · Tab cycles Simple / Regex / Boolean · {count_label}",
         ]
         if self.global_search_mode == SEARCH_SIMPLE:
             content.append("Simple: literal text · * any text · ? one character")
-        else:
+        elif self.global_search_mode == SEARCH_REGEX:
             content.append("Regex: Python regular-expression syntax")
+        else:
+            content.append("Boolean: AND / OR / NOT, parentheses and quoted phrases")
         content.append("")
 
         if self.global_search_error:
-            content.append(core.paint(f"Invalid regex: {self.global_search_error}", core.BOLD_YELLOW, self.color))
+            content.append(core.paint(f"Invalid search: {self.global_search_error}", core.BOLD_YELLOW, self.color))
         elif not self.global_search_buffer:
             content.append(core.paint("Type to search every currently watched file.", core.DIM, self.color))
         elif not self.global_search_results:
@@ -845,11 +971,14 @@ class MultiApp:
             "  z                  maximize focused pane / restore layout",
             "",
             "Focused pane",
-            "  /                  inline search; ↑/↓ cycle matches while typing",
+            "  :                  command palette / Markdown outline",
+            "  /                  inline search; Tab cycles Simple / Regex / Boolean",
             "  Ctrl+T             toggle Case / NoCase inside local search",
+            "  *                  search selected match / current word",
             "  n / N              next / previous committed local match",
             "  h                  set regex highlight; H clears it",
-            "  ↑ ↓ / PgUp PgDn    scroll",
+            "  ↑ ↓ / PgUp PgDn    vertical scroll",
+            "  ← →                horizontal scroll when wrap is off",
             "  [ / ]              previous / next update",
             "  f                  freshest update",
             "  p                  pause/resume automatic jumps",
@@ -995,13 +1124,15 @@ class MultiApp:
         elif self.update_release is not None:
             parts.append(f"UPDATE {self.update_release.version}")
         top = " · ".join(parts)
-        controls = "/ search · g global · n/N match · h highlight · Tab pane · l layout · ↑↓/Pg scroll · [/] update · f newest · t follow · p pause · u update · q quit · ? help"
+        controls = ": commands · / search · g global · * selected · n/N match · Tab pane · ↑↓ scroll · ←→ hscroll · [/] update · f newest · u update · ? help"
         return [top, controls]
 
     def _frame_rows(self) -> Tuple[int, List[str]]:
         width, body_height, footer_height = self.content_dimensions()
         base_body = self._pane_boxes(width, body_height)
-        if self.global_search_active:
+        if self.palette_active:
+            body = _overlay_modal(base_body, self._palette_lines(width, body_height), width, body_height, self.color)
+        elif self.global_search_active:
             body = _overlay_modal(base_body, self._global_search_lines(width, body_height), width, body_height, self.color)
         elif self.prompt_mode and self.prompt_mode != "search":
             body = _overlay_modal(base_body, self._prompt_lines(width, body_height), width, body_height, self.color)
@@ -1014,7 +1145,9 @@ class MultiApp:
         else:
             body = base_body
 
-        if self.global_search_active:
+        if self.palette_active:
+            status = ["COMMAND PALETTE · type to filter · ↑↓ select · Enter apply · Esc close", "Background watching continues while this dialog is open"]
+        elif self.global_search_active:
             status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ select · Enter jump · Tab mode · Esc close", "Background watching continues while this dialog is open"]
         elif self.prompt_mode:
             if self.prompt_mode == "search":
@@ -1113,6 +1246,24 @@ class MultiApp:
             self.dirty = True
 
     def handle_input(self, event: InputEvent) -> bool:
+        if self.palette_active and not isinstance(event, MouseEvent):
+            key = event
+            if key == "ESC":
+                self.palette_active = False; self.dirty = True; return False
+            if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN"):
+                self._refresh_palette()
+                if self.palette_items:
+                    delta = {"UP": -1, "DOWN": 1, "PAGEUP": -8, "PAGEDOWN": 8}[key]
+                    self.palette_selected = min(max(0, self.palette_selected + delta), len(self.palette_items) - 1)
+                self.dirty = True; return False
+            if key in ("\r", "\n"):
+                self._execute_palette_item(); self.dirty = True; return False
+            if key in ("\x7f", "\b"):
+                self.palette_buffer = self.palette_buffer[:-1]; self.palette_selected = 0; self._refresh_palette(); self.dirty = True; return False
+            if isinstance(key, str) and len(key) == 1 and key.isprintable():
+                self.palette_buffer += key; self.palette_selected = 0; self._refresh_palette(); self.dirty = True
+            return False
+
         if self.global_search_active and not isinstance(event, MouseEvent):
             key = event
             if key == "ESC":
@@ -1212,7 +1363,7 @@ class MultiApp:
             return False
 
         if isinstance(event, MouseEvent):
-            if not (self.help_active or self.layout_menu or self.update_confirm_active or self.global_search_active or self.prompt_mode):
+            if not (self.help_active or self.layout_menu or self.update_confirm_active or self.global_search_active or self.palette_active or self.prompt_mode):
                 self.handle_mouse(event)
             return False
 
@@ -1286,6 +1437,11 @@ class MultiApp:
                 self.dirty = True
             return False
 
+        if key == ":":
+            self._open_palette(); return False
+        if key == "*":
+            pane = self.active_pane(); inner_w, body_h = self._active_pane_geometry(); pane.search_selected(inner_w, body_h); self.dirty = True; return False
+
         if key == "/":
             pane = self.active_pane()
             self.prompt_restore_state = pane.search_state()
@@ -1348,6 +1504,8 @@ class MultiApp:
             pane.previous_update(); self.dirty = True; return False
         if key == "]":
             pane.next_update(); self.dirty = True; return False
+        if key in ("LEFT", "RIGHT"):
+            pane.scroll_horizontal(-4 if key == "LEFT" else 4); self.dirty = True; return False
         if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN", "HOME", "END"):
             rect = next((r for i, r in self.last_rects if (i == self.focus or (i == -1 and self.layout == "stream"))), None)
             body_h = max(1, (rect.height - 2) if rect else self.content_dimensions()[1] - 2)
@@ -1382,6 +1540,12 @@ class MultiApp:
 
     def tick(self, now: float) -> None:
         self._tick_updates(now)
+        for pane, follower in zip(self.panes, self.followers):
+            lifecycle = getattr(follower, "lifecycle_text", None)
+            status = lifecycle(now) if callable(lifecycle) else ""
+            if pane.source_status != status:
+                pane.source_status = status
+                self.dirty = True
         if self.update_install_result is not None and not self.update_installing:
             ok, message = self.update_install_result
             self.update_install_result = None
@@ -1444,6 +1608,8 @@ class MultiApp:
                 continue
 
             if isinstance(result, WatchUpdate):
+                byte_count = sum(len(line.encode(self.args.encoding, errors="replace")) for kind, lines in result.events if kind != "delete" for line in lines)
+                pane.record_activity(result.added + result.replaced, byte_count, now)
                 if pane.missing:
                     pane.add_system_line(f"resumed {pane.path}")
                 header, rendered = pane.add_update(
@@ -1609,12 +1775,12 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
         if str(path) == "-":
             pseudo = Path("stdin.txt")
             highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
-            pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name="stdin")
+            pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name="stdin", heartbeat_seconds=args.heartbeat)
             follower = StreamFollower(sys.stdin, args, label="stdin")
         else:
-            highlighter = core.SyntaxHighlighter(path, args.syntax, color)
-            pane = Pane(path, highlighter, display_filter, color, args.idle_warn)
-            follower = FileFollower(path, args)
+            highlighter = core.SyntaxHighlighter(syntax_path_for_source(path), args.syntax, color)
+            pane = Pane(path, highlighter, display_filter, color, args.idle_warn, heartbeat_seconds=args.heartbeat)
+            follower = CompressedFollower(path, args) if is_compressed_path(path) else FileFollower(path, args)
         notice = follower.initialize_if_available()
         panes.append(pane)
         followers.append(follower)
@@ -1634,13 +1800,23 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
     for command_index, command in enumerate(args.commands, start=1):
         pseudo = Path(f"command-{command_index}.log")
         highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
-        pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=f"$ {command}")
+        pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=f"$ {command}", heartbeat_seconds=args.heartbeat)
         follower = CommandFollower(command, args, label=pane.name)
         follower.initialize_if_available()
         panes.append(pane)
         followers.append(follower)
         if not args.no_start_banner:
             print(f"[htail {VERSION}] [{len(panes)}] running {command} (pid {follower.process.pid})")
+
+    for source in args.ssh_sources:
+        follower = SSHFollower(source, args)
+        pseudo = Path("ssh.log")
+        highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
+        pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=follower.label, heartbeat_seconds=args.heartbeat)
+        follower.initialize_if_available()
+        panes.append(pane); followers.append(follower)
+        if not args.no_start_banner:
+            print(f"[htail {VERSION}] [{len(panes)}] following {follower.label} (pid {follower.process.pid})")
 
     next_glob_scan = 0.0
     try:
@@ -1702,12 +1878,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[htail] {message}", file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1
 
-    if not args.files and not args.commands and not args.globs and not sys.stdin.isatty():
+    if not args.files and not args.commands and not args.ssh_sources and not args.globs and not sys.stdin.isatty():
         args.files = [Path("-")]
 
-    if not args.files and not args.commands and not args.globs:
+    if not args.files and not args.commands and not args.ssh_sources and not args.globs:
         print(f"htail {VERSION}")
-        print("Usage: ht FILE [FILE ...] | ht --glob 'logs/*.log' | producer | ht | ht --exec COMMAND")
+        print("Usage: ht FILE [FILE ...] | ht --glob 'logs/*.log' | ht --ssh user@host:/path | producer | ht | ht --exec COMMAND")
         print("Example: ht reviewer.md implementer.md")
         return 0
 
@@ -1719,7 +1895,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     core.maybe_offer_pygments_install(args, color)
     has_stdin_source = any(str(path) == "-" for path in args.files)
-    interactive = sys.stdout.isatty() and (sys.stdin.isatty() or has_stdin_source or bool(args.commands) or bool(args.globs))
+    interactive = sys.stdout.isatty() and (sys.stdin.isatty() or has_stdin_source or bool(args.commands) or bool(args.ssh_sources) or bool(args.globs))
     if interactive:
         return run_interactive(args, color, display_filter, update_service)
     return run_noninteractive(args, color, display_filter)

@@ -95,7 +95,7 @@ SHOW_CURSOR = "\033[?25h"
 ALT_SCREEN_ON = "\033[?1049h"
 ALT_SCREEN_OFF = "\033[?1049l"
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+ANSI_RE = re.compile(r"(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~])")
 
 HTAIL_VERSION = "0.7.3"
 ACTIVE_VERIFY_WINDOW = 15.0

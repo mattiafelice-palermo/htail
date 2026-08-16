@@ -7,7 +7,7 @@ import unittest
 from htail_app import app, core
 from htail_app.app import MultiApp
 from htail_app.pane import Pane
-from htail_app.searching import SEARCH_REGEX, SEARCH_SIMPLE, compile_search, simple_pattern_to_regex
+from htail_app.searching import SEARCH_BOOLEAN, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, simple_pattern_to_regex
 
 
 class SimpleSearchCompilerTests(unittest.TestCase):
@@ -77,7 +77,7 @@ class SearchModalInteractionTests(unittest.TestCase):
         args = app.parse_args([str(a), str(b), "--no-native-watch", "--no-color"])
         return MultiApp(args, False, core.DisplayFilter(), core.UpdateService(""))
 
-    def test_local_search_defaults_simple_and_tab_toggles_regex(self):
+    def test_local_search_defaults_simple_and_tab_cycles_all_modes(self):
         with tempfile.TemporaryDirectory() as td:
             application = self.make_app(Path(td))
             try:
@@ -85,6 +85,8 @@ class SearchModalInteractionTests(unittest.TestCase):
                 self.assertEqual(application.prompt_search_mode, SEARCH_SIMPLE)
                 application.handle_input("TAB")
                 self.assertEqual(application.prompt_search_mode, SEARCH_REGEX)
+                application.handle_input("TAB")
+                self.assertEqual(application.prompt_search_mode, SEARCH_BOOLEAN)
                 application.handle_input("TAB")
                 self.assertEqual(application.prompt_search_mode, SEARCH_SIMPLE)
             finally:
