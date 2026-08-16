@@ -95,6 +95,20 @@ Search and highlight prompts use regular expressions. `-I` / `--ignore-case` als
 
 Mouse tracking can be disabled with `--no-mouse`. Keyboard controls always remain available.
 
+### Search
+
+Press `/` for search inside the focused pane. Search opens in **Simple** mode: ordinary text is literal, `*` means any text and `?` means one character. Press `Tab` inside the search dialog to switch to explicit Python-regex mode. After applying a search, `n` / `N` move between matches.
+
+Examples:
+
+```text
+045blabla       literal substring
+045*blabla      045, then any text, then blabla
+run-??-error    exactly two characters between the dashes
+```
+
+Press `g` for **global live search** across every currently watched file. Results update as you type. Use `↑` / `↓` to choose a result and `Enter` to focus its pane and jump to the matching source line; the query becomes that pane's active local search. `Tab` toggles Simple / Regex here as well.
+
 A new update moves **only its own pane** to the beginning of that update. Other panes keep their current reading position. While a pane is paused, changes are still captured and its title reports unseen updates. The focused pane is visually distinguished from the others.
 
 ## Display and performance features

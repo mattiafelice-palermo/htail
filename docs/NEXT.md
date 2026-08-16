@@ -8,7 +8,7 @@ This file records useful ideas that are **not part of the current release**. It 
 - **Semantic log-level navigation** — optional detection of ERROR/WARN/etc. with next/previous-error shortcuts. Keep this generic rather than building a full log-schema engine.
 - **Session restore** — remember layout, pane focus, scroll positions, filters, search and highlights for the same source set.
 - **Search-result overview** — now that interactive regex search exists, matches could also appear on a compact scrollbar/minimap.
-- **Global live search palette** — open a modal that searches across all currently watched files while the user types, showing source/pane plus a short matching-line preview. Selecting a result should close the modal, focus the corresponding pane, jump to that match, and temporarily highlight the matched text. The interaction should support an easy literal/wildcard mode as well as explicit regex mode rather than requiring regex syntax for ordinary searches.
+- **Global-search refinements** — 0.11.0 adds the live cross-file palette with Simple/Regex modes and jump-to-result. Future refinements could add mouse result selection, optional surrounding context, match grouping by file, or a compact result minimap.
 - **Multiple named highlight rules** — 0.10.0 provides one persistent regex highlight per pane; a future version could support several independently styled rules.
 
 ## Sources
@@ -40,4 +40,4 @@ This file records useful ideas that are **not part of the current release**. It 
 
 ## Ideas borrowed from existing tools
 
-The most relevant references remain lnav, MultiTail and tailspin. Interactive regex search, regex highlighting and live glob discovery have now landed in htail; bookmarks, session restore, semantic warning/error navigation and a compact minimap remain the most useful ideas to borrow without turning htail into a full log-analysis engine.
+The most relevant references remain lnav, MultiTail and tailspin. Simple/regex local search, global live search, regex highlighting and live glob discovery have now landed in htail; bookmarks, session restore, semantic warning/error navigation and a compact minimap remain the most useful ideas to borrow without turning htail into a full log-analysis engine.
