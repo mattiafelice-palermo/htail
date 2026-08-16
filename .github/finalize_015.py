@@ -51,7 +51,7 @@ p = Path('tests/test_features_015.py')
 t = p.read_text(encoding='utf-8')
 t = t.replace(
     "        self.assertEqual(pane.horizontal_offset, 8)\n",
-    "        self.assertEqual(pane.horizontal_offset, 8)\n        pane.scroll_horizontal(10000, 30)\n        max_width = max(len(core.strip_ansi(row)) for row in pane._snapshot_visual_lines)\n        self.assertLessEqual(pane.horizontal_offset, max(0, max_width - 30))\n",
+    "        self.assertEqual(pane.horizontal_offset, 8)\n        pane.scroll_horizontal(10000, 30)\n        active_rows = pane._snapshot_visual_lines if pane.prefer_snapshot else pane._visual_lines\n        max_width = max((len(core.strip_ansi(row)) for row in active_rows), default=0)\n        self.assertLessEqual(pane.horizontal_offset, max(0, max_width - 30))\n",
     1,
 )
 t = t.replace(
