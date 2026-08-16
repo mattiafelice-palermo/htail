@@ -27,6 +27,7 @@ jobs:
           else
             python .github/patch_016.py
           fi
+          python .github/finalize_016.py
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
       - name: Commit product patch
@@ -37,7 +38,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add src
-            git commit -m "Implement htail 0.16 global search core"
+            git commit -m "Harden htail 0.16 global search renderer"
             git push origin HEAD:feature/global-search-redesign-0.16.0
           fi
       - name: Run tests
