@@ -188,7 +188,7 @@ def _highlight_span(text: str, start: int, end: int, *, selected: bool, color: b
         return text
     end = min(len(text), end)
     on = "\x1b[1;30;48;5;208m" if selected else "\x1b[1;30;106m"
-    off = "\x1b[0m"
+    off = "\x1b[1;97;48;5;24m" if selected else "\x1b[0m"
     return text[:start] + on + text[start:end] + off + text[end:]
 
 
@@ -368,7 +368,7 @@ def render_global_search(
     footer_text = "↑↓ select · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close"
 
     show_preview = preview_enabled and panel_width >= 96
-    body_height = max(3, panel_height - 7)
+    body_height = max(3, panel_height - 8)
     if show_preview:
         left_width = max(40, int((inner - 1) * 0.62))
         right_width = inner - left_width - 1
@@ -396,7 +396,9 @@ def render_global_search(
         right_rows.extend(_preview_rows(panes, selected_result, body_height - 1, right_width, color))
         right_rows = right_rows[:body_height] + [""] * max(0, body_height - len(right_rows))
 
-    top = "╭" + "─" * (panel_width - 2) + "╮"
+    title = " Global search "
+    title_fill = max(0, panel_width - 2 - len(title))
+    top = "╭" + "─" * min(3, title_fill) + title + "─" * max(0, title_fill - 3) + "╮"
     bottom = "╰" + "─" * (panel_width - 2) + "╯"
     panel: List[str] = [core.paint(top, core.BOLD_LIGHT_CYAN, color)]
     for row in header_rows:
