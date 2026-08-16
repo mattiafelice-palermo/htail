@@ -249,7 +249,7 @@ def _grouped_result_rows(
         active = pane_index == selected_pane
         symbol = "▼" if active else "▶"
         best = max((member.score or 0.0) for _, member in members)
-        score_suffix = f" · best {best:.0f}" if members and members[0].score is not None else ""
+        score_suffix = f" · best {best:.0f}" if members and members[0][1].score is not None else ""
         header = f"{symbol} {pane_name}  {len(members)}{score_suffix}"
         out.append(_pad(core.paint(header, core.BOLD_LIGHT_CYAN if active else core.DIM, color), width))
         if not active:

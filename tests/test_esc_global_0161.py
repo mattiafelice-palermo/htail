@@ -41,7 +41,7 @@ class ModalEscapeTests(unittest.TestCase):
             finally:
                 a.close_native_watch()
 
-    def test_typing_global_search_with_color_cannot_exit_viewer(self):
+    def test_typing_global_search_with_color_renders_results_without_fallback(self):
         with tempfile.TemporaryDirectory() as td:
             a = self.make_app(td, color=True)
             try:
@@ -50,7 +50,11 @@ class ModalEscapeTests(unittest.TestCase):
                 self.assertTrue(a.global_search_active)
                 width, frame = a._frame_rows()
                 self.assertGreater(width, 0)
-                self.assertIn('Global search', '\n'.join(core.strip_ansi(row) for row in frame))
+                screen = '\n'.join(core.strip_ansi(row) for row in frame)
+                self.assertIn('Global search', screen)
+                self.assertIn('RESULTS', screen)
+                self.assertNotIn('Search rendering error', screen)
+                self.assertNotIn('AttributeError', screen)
             finally:
                 a.close_native_watch()
 
