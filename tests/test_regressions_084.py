@@ -102,7 +102,7 @@ class Htail084Regressions(unittest.TestCase):
         self.assertGreaterEqual(len(downloads), 2)
         self.assertEqual(downloads[-1][1:], (len(content), len(content)))
         stages = [event[0] for event in events]
-        self.assertIn('Verifying SHA-256 checksum…', stages)
+        self.assertIn('Verifying release SHA-256 checksum…', stages)
         self.assertIn('Backing up current executable…', stages)
         self.assertIn('Installing update…', stages)
 

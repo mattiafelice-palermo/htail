@@ -64,6 +64,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
+import io
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -974,6 +976,9 @@ class ReleaseInfo:
     asset_name: str
     checksum_url: Optional[str] = None
     notes: str = ""
+    runtime_url: Optional[str] = None
+    runtime_checksum_url: Optional[str] = None
+    runtime_abi: Optional[str] = None
 
 
 def _clean_release_note_line(text: str) -> str:
@@ -1030,6 +1035,65 @@ def is_newer_version(candidate: str, current: str) -> bool:
     candidate_key = _version_key(candidate)
     current_key = _version_key(current)
     return bool(candidate_key and current_key and candidate_key > current_key)
+
+
+def current_cpython_abi() -> str:
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def runtime_cache_dir(runtime_id: str, abi: str) -> Path:
+    root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "htail"
+    return root / "runtime" / runtime_id / abi
+
+
+def _runtime_id_from_source(source: str) -> Optional[str]:
+    match = re.search(r'^HTAIL_RUNTIME_ID\s*=\s*"([0-9a-fA-F]{64})"', source, re.MULTILINE)
+    return match.group(1).lower() if match else None
+
+
+def _install_runtime_bundle(content: bytes, target: Path, runtime_id: str, abi: str, report) -> None:
+    with zipfile.ZipFile(io.BytesIO(content)) as outer:
+        manifest = json.loads(outer.read("runtime.json").decode("utf-8"))
+        if manifest.get("runtime_id") != runtime_id:
+            raise RuntimeError("runtime bundle id does not match htail core")
+        if manifest.get("abi") != abi:
+            raise RuntimeError(f"runtime bundle ABI {manifest.get('abi')!r} does not match {abi}")
+        payloads = []
+        total = 0
+        for wheel_name in manifest.get("wheels") or []:
+            payload = outer.read("wheels/" + wheel_name)
+            with zipfile.ZipFile(io.BytesIO(payload)) as wheel:
+                total += sum(item.file_size for item in wheel.infolist() if not item.is_dir())
+            payloads.append(payload)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = Path(tempfile.mkdtemp(prefix=f".{abi}-", dir=str(target.parent)))
+    current = 0
+    try:
+        report(f"Unpacking runtime {abi}…", current, total)
+        for payload in payloads:
+            with zipfile.ZipFile(io.BytesIO(payload)) as wheel:
+                for item in wheel.infolist():
+                    if item.is_dir():
+                        continue
+                    destination = (temp / item.filename).resolve()
+                    if temp.resolve() not in destination.parents:
+                        raise RuntimeError(f"unsafe runtime path: {item.filename}")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with wheel.open(item) as src, destination.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    mode = (item.external_attr >> 16) & 0o777
+                    if mode:
+                        os.chmod(destination, mode)
+                    current += item.file_size
+                    report(f"Unpacking runtime {abi}…", current, total)
+        try:
+            os.replace(temp, target)
+        except OSError:
+            if not target.is_dir():
+                raise
+    finally:
+        if temp.exists():
+            shutil.rmtree(temp, ignore_errors=True)
 
 
 class UpdateService:
@@ -1121,6 +1185,10 @@ class UpdateService:
         assets = payload.get("assets") or []
         asset_url: Optional[str] = None
         checksum_url: Optional[str] = None
+        runtime_abi = current_cpython_abi()
+        runtime_name = f"htail-runtime-{runtime_abi}.zip"
+        runtime_url: Optional[str] = None
+        runtime_checksum_url: Optional[str] = None
         for asset in assets:
             name = str(asset.get("name") or "")
             url = str(asset.get("browser_download_url") or "")
@@ -1128,6 +1196,10 @@ class UpdateService:
                 asset_url = url
             elif name in (f"{self.asset_name}.sha256", f"{self.asset_name}.sha256sum") and url:
                 checksum_url = url
+            elif name == runtime_name and url:
+                runtime_url = url
+            elif name in (f"{runtime_name}.sha256", f"{runtime_name}.sha256sum") and url:
+                runtime_checksum_url = url
 
         if not asset_url:
             raise RuntimeError(
@@ -1145,6 +1217,9 @@ class UpdateService:
             asset_name=self.asset_name,
             checksum_url=checksum_url,
             notes=notes,
+            runtime_url=runtime_url,
+            runtime_checksum_url=runtime_checksum_url,
+            runtime_abi=runtime_abi,
         )
 
     def install(
@@ -1203,7 +1278,7 @@ class UpdateService:
                     report("Downloading release…", current, total)
                 content = b"".join(chunks)
 
-            report("Verifying SHA-256 checksum…")
+            report("Verifying release SHA-256 checksum…")
             expected_sha256: Optional[str] = None
             if release.checksum_url:
                 checksum_request = urllib.request.Request(release.checksum_url, headers={"User-Agent": f"htail/{HTAIL_VERSION}"})
@@ -1230,6 +1305,45 @@ class UpdateService:
                 compile(source, str(target), "exec")
             except SyntaxError as exc:
                 return False, f"downloaded update failed syntax validation: {exc}"
+
+            runtime_id = _runtime_id_from_source(source)
+            if runtime_id:
+                abi = release.runtime_abi or current_cpython_abi()
+                runtime_target = runtime_cache_dir(runtime_id, abi)
+                if runtime_target.is_dir():
+                    report(f"Runtime already prepared ({abi})…")
+                else:
+                    if not release.runtime_url or not release.runtime_checksum_url:
+                        return False, f"release {release.tag} has no runtime asset for {abi}"
+                    runtime_request = urllib.request.Request(release.runtime_url, headers={"User-Agent": f"htail/{HTAIL_VERSION}"})
+                    with urllib.request.urlopen(runtime_request, timeout=20.0) as response:
+                        headers = getattr(response, "headers", {})
+                        size = headers.get("Content-Length") if hasattr(headers, "get") else None
+                        runtime_total = int(size) if size and size.isdigit() else None
+                        runtime_chunks = []
+                        runtime_current = 0
+                        report(f"Downloading runtime {abi}…", runtime_current, runtime_total)
+                        while True:
+                            try:
+                                chunk = response.read(65536)
+                            except TypeError:
+                                chunk = response.read()
+                            if not chunk:
+                                break
+                            runtime_chunks.append(chunk)
+                            runtime_current += len(chunk)
+                            report(f"Downloading runtime {abi}…", runtime_current, runtime_total)
+                        runtime_content = b"".join(runtime_chunks)
+                    report(f"Verifying runtime {abi}…")
+                    checksum_request = urllib.request.Request(release.runtime_checksum_url, headers={"User-Agent": f"htail/{HTAIL_VERSION}"})
+                    with urllib.request.urlopen(checksum_request, timeout=10.0) as response:
+                        checksum_text = response.read().decode("utf-8", errors="replace")
+                    checksum_match = re.search(r"\b([0-9a-fA-F]{64})\b", checksum_text)
+                    if not checksum_match:
+                        return False, "runtime checksum asset does not contain a SHA-256 digest"
+                    if hashlib.sha256(runtime_content).hexdigest() != checksum_match.group(1).lower():
+                        return False, "downloaded runtime failed SHA-256 verification"
+                    _install_runtime_bundle(runtime_content, runtime_target, runtime_id, abi, report)
 
             report("Preparing update…")
             fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.update-", dir=str(target_dir))
