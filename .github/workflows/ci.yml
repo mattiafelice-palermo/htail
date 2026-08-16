@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: tools/bundle-requirements.txt
       - name: Install test dependency
         run: python -m pip install --disable-pip-version-check RapidFuzz==3.14.5
       - name: Compile source
@@ -33,7 +35,11 @@ jobs:
         run: python benchmarks/reference_compare.py --reference v0.9.0
       - name: Build standalone executable
         run: python tools/build_release.py --output /tmp/htail
-      - name: Smoke test bundle
+      - name: Build current-ABI runtime
+        run: python tools/build_runtime.py --output-dir /tmp/runtime --abi cp313
+      - name: Smoke test current-ABI runtime
+        run: python tools/build_runtime.py --self-test /tmp/runtime/htail-runtime-cp313.zip
+      - name: Smoke test core
         env:
           PYTHONPATH: src
         run: |
@@ -41,4 +47,3 @@ jobs:
           expected="$(python -c 'from htail_app import VERSION; print(f"htail {VERSION}")')"
           echo "$actual"
           test "$actual" = "$expected"
-          python /tmp/htail --bundle-self-test
