@@ -354,8 +354,9 @@ def render_global_search(
 
     mode_parts = [_tab(label, mode == value, color) for value, label in mode_labels]
     case_label = _tab("NoCase" if ignore_case else "Case", True, color)
-    sort_label = _tab("Relevance" if sort_mode == SORT_RELEVANCE else "File", True, color)
-    mode_row = "  ".join(mode_parts) + f"    {case_label}    Sort: {sort_label}"
+    sort_relevance = _tab("Relevance", sort_mode == SORT_RELEVANCE, color)
+    sort_file = _tab("File", sort_mode == SORT_FILE, color)
+    mode_row = "  ".join(mode_parts) + f"    Case: {case_label}    Sort: {sort_relevance}  {sort_file}"
     if len(core.strip_ansi(mode_row)) + len(count_label) + 2 <= inner:
         mode_row += " " * (inner - len(core.strip_ansi(mode_row)) - len(count_label)) + count_label
 
