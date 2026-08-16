@@ -32,8 +32,23 @@ def _args(**overrides):
     return SimpleNamespace(**base)
 
 
+def _normalize_intentional_ui(text: str) -> str:
+    # 0.12.0 intentionally exposes the default follow mode in pane titles.
+    # Remove only that label and restore the same top-border width before
+    # comparing invariant content/render behavior to v0.9.0.
+    marker = " · CHANGES"
+    count = text.count(marker)
+    if not count:
+        return text
+    text = text.replace(marker, "")
+    if text.startswith("╭") and "╮" in text:
+        end = text.rfind("╮")
+        text = text[:end] + ("─" * (len(marker) * count)) + text[end:]
+    return text
+
+
 def _plain(core, rows):
-    return [core.strip_ansi(row) for row in rows]
+    return [_normalize_intentional_ui(core.strip_ansi(row)) for row in rows]
 
 
 
@@ -213,7 +228,7 @@ def main() -> int:
             close = getattr(application, "close_native_watch", None)
             if close is not None:
                 close()
-        behavior["final_terminal_body"] = emulate_terminal(combined_output, 120, 40)[:-2]
+        behavior["final_terminal_body"] = [_normalize_intentional_ui(row) for row in emulate_terminal(combined_output, 120, 40)[:-2]]
         performance["status_redraw_ms"] = elapsed * 1000.0
         performance["status_redraw_bytes"] = len(incremental_output)
 

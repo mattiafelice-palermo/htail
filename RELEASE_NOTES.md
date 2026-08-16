@@ -1,14 +1,13 @@
-# htail 0.11.0
+# htail 0.12.0
 
 ## New features
 
-- Local `/` search now opens in **Simple** mode by default: ordinary characters are literal, `*` matches any text, and `?` matches one character. Press `Tab` inside the modal to switch explicitly between Simple and Regex modes.
-- Added `g` global live search across all currently watched files. Results update while typing and show pane, source line and a matching preview.
-- In global search, use `↑` / `↓` to choose a result and `Enter` to focus that pane, jump to the matching source line and make the query the pane's active search so `n` / `N` continue naturally.
-- Global search also supports the same explicit Simple / Regex toggle with `Tab`.
+- Added per-pane **CHANGES / TAIL** follow modes. CHANGES remains the default and opens new updates at their first changed/new line; TAIL stays pinned to EOF for continuously growing program output.
+- Press `t` to toggle the focused pane's follow mode. Manual upward navigation suspends TAIL auto-follow; `f`, `End`, or returning to EOF resumes it.
+- Local Simple and Regex searches now show the selected `n` / `N` match with a distinct bright-yellow background, while other matches retain reverse-video highlighting.
+- Pane titles now show persistent `MATCH x/y` search position and the active follow mode.
 
-## Bug fixes / safety
+## Bug fixes
 
-- Regex punctuation is treated literally in Simple mode, so searches such as `a.b`, `[045]` or paths do not require escaping.
-- Search modals now ignore mouse clicks on the dimmed background instead of changing pane focus behind the dialog.
-- Existing `h` persistent highlight rules remain explicitly regex-based; their behavior is unchanged.
+- Initial file viewing now remains bottom-aligned across startup terminal/layout geometry changes instead of consuming the EOF-position request after the first render and sometimes falling back to the top with `↓N more`.
+- Search selection styling is repainted when moving between matches, so the active result never remains visually ambiguous.
