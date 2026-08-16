@@ -1422,6 +1422,7 @@ class MultiApp:
                 self.global_search_ignore_case = not self.global_search_ignore_case
                 self.global_search_selected = 0
                 self._refresh_global_search_results()
+                self._expand_selected_global_search_file()
                 self.dirty = True
                 return False
             if key == "CTRL_O":
