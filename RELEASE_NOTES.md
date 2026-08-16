@@ -1,3 +1,15 @@
+# htail 0.16.15
+
+## New features
+
+- Interactive rendering now keeps complete rendered pane boxes for unchanged panes and uses pane-scoped invalidation for ordinary keyboard/mouse scrolling, so moving through one file does not re-render every other visible pane.
+- Stable viewport-row decoration is now cached, avoiding repeated URL-linkification, horizontal slicing, ANSI clipping, and padding work when the same rendered rows remain visible across scroll frames.
+- A dedicated `benchmarks/render_scroll.py` benchmark now measures scoped-scroll frame cost, all-pane rebuild cost, and pane/viewport cache hit rates on synthetic multi-pane files.
+
+## Bug fixes
+
+- Scrolling performance no longer scales as directly with the number of unchanged panes on screen; conservative full-frame invalidation remains the fallback for layout, modal, timer, and other global UI changes.
+
 # htail 0.16.14
 
 ## New features
