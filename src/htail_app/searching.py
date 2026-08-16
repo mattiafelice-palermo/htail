@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Iterator, List, Optional, Pattern, Sequence, Tuple
+from typing import Iterator, List, Optional, Pattern, Sequence
 
 SEARCH_SIMPLE = "simple"
 SEARCH_REGEX = "regex"
 SEARCH_BOOLEAN = "boolean"
+SEARCH_FUZZY = "fuzzy"
 SEARCH_MODES = (SEARCH_SIMPLE, SEARCH_REGEX, SEARCH_BOOLEAN)
+GLOBAL_SEARCH_MODES = (SEARCH_SIMPLE, SEARCH_REGEX, SEARCH_BOOLEAN, SEARCH_FUZZY)
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,7 @@ class GlobalSearchMatch:
     text: str
     match_start: int
     match_end: int
+    score: Optional[float] = None
 
 
 def simple_pattern_to_regex(expression: str) -> str:
@@ -222,6 +225,8 @@ def compile_search(expression: str, mode: str, flags: int = 0):
         source = simple_pattern_to_regex(expression)
     elif mode == SEARCH_REGEX:
         source = expression
+    elif mode == SEARCH_FUZZY:
+        return None, "fuzzy search is available only in global search"
     else:
         return None, f"unknown search mode: {mode}"
     try:
@@ -235,6 +240,8 @@ def search_label(expression: str, mode: str) -> str:
         return f"/{expression}/"
     if mode == SEARCH_BOOLEAN:
         return f"bool:{expression}"
+    if mode == SEARCH_FUZZY:
+        return f"fuzzy:{expression}"
     return expression
 
 
