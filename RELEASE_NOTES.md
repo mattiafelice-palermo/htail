@@ -1,3 +1,15 @@
+# htail 0.16.13
+
+## New features
+
+- None.
+
+## Bug fixes
+
+- Remote Git file sources now use an htail-owned blobless partial-clone cache on filter-capable remotes, fetching commit/tree metadata first and demand-fetching only the selected file blob. The previous shallow snapshot fetch remains as a compatibility fallback.
+- Interactive self-update now makes the 100% `Update complete` state render before restart scheduling continues, so a successful update cannot jump directly from an intermediate percentage to the restarted application.
+- Self-update now labels real release, runtime, and checksum connection attempts and retries as explicit progress stages, so a slow TLS/network connection is visible instead of looking frozen at a fixed percentage.
+
 # htail 0.16.12
 
 ## New features
