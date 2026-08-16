@@ -23,3 +23,34 @@ text = text.replace(marker, global_patch + marker, 1)
 
 path.write_text(text, encoding='utf-8')
 exec(compile(text, str(path), 'exec'), {'__name__': '__main__', '__file__': str(path)})
+
+# Post-application test migrations. These intentionally test output behavior,
+# not private pre-output caches, and update the old two-mode search contract.
+p = Path('tests/test_features_015.py')
+t = p.read_text(encoding='utf-8')
+t = t.replace(
+    "        box = '\\n'.join(core.strip_ansi(row) for row in pane.render_box(30, 6, True, 0))\n        self.assertIn('LN', box.splitlines()[0])\n        self.assertIn('NOWRAP', box.splitlines()[0])\n        self.assertEqual(pane.horizontal_offset, 8)\n",
+    "        box = '\\n'.join(core.strip_ansi(row) for row in pane.render_box(120, 6, True, 0))\n        self.assertTrue(pane.show_line_numbers)\n        self.assertFalse(pane.wrap_enabled)\n        self.assertIn('LN', box.splitlines()[0])\n        self.assertIn('NOWRAP', box.splitlines()[0])\n        self.assertEqual(pane.horizontal_offset, 8)\n",
+)
+t = t.replace(
+    "        pane.render_box(100, 6, True, 0)\n        rendered = '\\n'.join(pane._visual_lines)\n        self.assertIn('\\x1b]8;;https://example.com/very/long/path', rendered)\n        self.assertNotIn('\\x1b]8;;', core.strip_ansi(rendered))\n",
+    "        rendered = '\\n'.join(pane.render_box(100, 6, True, 0))\n        self.assertIn('\\x1b]8;;https://example.com/very/long/path', rendered)\n        self.assertNotIn('\\x1b]8;;', core.strip_ansi(rendered))\n",
+)
+p.write_text(t, encoding='utf-8')
+
+p = Path('tests/test_search_011.py')
+t = p.read_text(encoding='utf-8')
+t = t.replace(
+    'from htail_app.searching import SEARCH_REGEX, SEARCH_SIMPLE',
+    'from htail_app.searching import SEARCH_BOOLEAN, SEARCH_REGEX, SEARCH_SIMPLE',
+)
+t = t.replace(
+    '    def test_local_search_defaults_simple_and_tab_toggles_regex(self):',
+    '    def test_local_search_defaults_simple_and_tab_cycles_all_modes(self):',
+)
+t = t.replace(
+    '                application.handle_input("TAB")\n                self.assertEqual(application.prompt_search_mode, SEARCH_SIMPLE)\n            finally:',
+    '                application.handle_input("TAB")\n                self.assertEqual(application.prompt_search_mode, SEARCH_BOOLEAN)\n                application.handle_input("TAB")\n                self.assertEqual(application.prompt_search_mode, SEARCH_SIMPLE)\n            finally:',
+    1,
+)
+p.write_text(t, encoding='utf-8')
