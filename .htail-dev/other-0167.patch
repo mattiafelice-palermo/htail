@@ -1,0 +1,42 @@
+--- a/src/htail_app/global_search.py
++++ b/src/htail_app/global_search.py
+@@ -504,9 +504,12 @@
+         filter_row += "    " + core.paint(f"Backend: {fuzzy_backend()}", core.DIM, color)
+ 
+     header_rows = [search_row, mode_row, filter_row]
+-    footer_text = "↑↓ match · Shift+↑↓ file · Ctrl+↑↓ preview · Ctrl+W wrap · ←→ hscroll · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close"
+ 
+     show_preview = preview_enabled and panel_width >= 96
++    if show_preview:
++        footer_text = "↑↓ match · Shift+↑↓ file · Ctrl+↑↓/Pg preview · Ctrl+W wrap · ←→ hscroll · Enter jump · Ctrl+O(letter) sort · Ctrl+P preview · Esc close"
++    else:
++        footer_text = "↑↓ match · Shift+↑↓ file · Enter jump · Tab mode · Ctrl+T case · Ctrl+O(letter) sort · Ctrl+F file · Ctrl+P preview · Esc close"
+     body_height = max(3, panel_height - 8)
+     if show_preview:
+         left_width = max(40, int((inner - 1) * 0.62))
+--- a/src/htail_app/input.py
++++ b/src/htail_app/input.py
+@@ -188,7 +188,22 @@
+                     "H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT",
+                     "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END",
+                 }
+-                return mapping.get(special)
++                key = mapping.get(special)
++                if key is None:
++                    return None
++                try:
++                    import ctypes
++                    VK_CONTROL = 0x11
++                    if ctypes.windll.user32.GetKeyState(VK_CONTROL) & 0x8000:
++                        controlled = {
++                            "UP": "CTRL_UP", "DOWN": "CTRL_DOWN",
++                            "LEFT": "CTRL_LEFT", "RIGHT": "CTRL_RIGHT",
++                            "PAGEUP": "CTRL_PAGEUP", "PAGEDOWN": "CTRL_PAGEDOWN",
++                        }
++                        return controlled.get(key, key)
++                except Exception:
++                    pass
++                return key
+             return normalize_plain_key(ch)
+         except Exception:
+             return None
