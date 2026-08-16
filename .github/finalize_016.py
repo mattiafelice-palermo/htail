@@ -23,4 +23,11 @@ if new_top not in text:
         raise RuntimeError("panel-title patch point missing")
     text = text.replace(old_top, new_top, 1)
 
+old_controls = '''    case_label = _tab("NoCase" if ignore_case else "Case", True, color)\n    sort_label = _tab("Relevance" if sort_mode == SORT_RELEVANCE else "File", True, color)\n    mode_row = "  ".join(mode_parts) + f"    {case_label}    Sort: {sort_label}"\n'''
+new_controls = '''    case_label = _tab("NoCase" if ignore_case else "Case", True, color)\n    sort_relevance = _tab("Relevance", sort_mode == SORT_RELEVANCE, color)\n    sort_file = _tab("File", sort_mode == SORT_FILE, color)\n    mode_row = "  ".join(mode_parts) + f"    Case: {case_label}    Sort: {sort_relevance}  {sort_file}"\n'''
+if new_controls not in text:
+    if text.count(old_controls) != 1:
+        raise RuntimeError("control-row patch point missing")
+    text = text.replace(old_controls, new_controls, 1)
+
 path.write_text(text, encoding="utf-8")
