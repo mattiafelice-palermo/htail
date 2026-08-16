@@ -6,6 +6,7 @@ on:
       - feature/search-ux-0.14.0
     paths:
       - .github/patch_014.py
+      - .github/patch_014_fix.py
       - .github/workflows/patch-014.yml
 
 permissions:
@@ -23,7 +24,7 @@ jobs:
         with:
           python-version: "3.x"
       - name: Apply patch
-        run: python .github/patch_014.py
+        run: python .github/patch_014_fix.py
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
       - name: Run tests
