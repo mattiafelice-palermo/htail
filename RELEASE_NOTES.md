@@ -1,3 +1,19 @@
+# htail 0.16.7
+
+## Global search preview navigation
+
+- The preview now wraps long source lines by default so the full selected line and its surrounding context can be read without leaving global search.
+- Preview context has an independent viewport: Ctrl+Up / Ctrl+Down moves one source line and Ctrl+PgUp / Ctrl+PgDn moves by larger steps without changing the selected search result.
+- Mouse-wheel input follows the pointer: over the preview it scrolls context, while over the results list it continues to navigate matches.
+- Ctrl+W toggles wrapping. With wrapping disabled, Left / Right horizontally scrolls the preview while preserving the match-aware initial position.
+- Selecting a different search result recenters the preview on that result and clears manual vertical/horizontal offsets.
+
+## Input and regression coverage
+
+- Added terminal decoding for Ctrl+arrow and Ctrl+Page navigation, including Windows modifier handling.
+- Added renderer and interaction coverage for wrapping, independent context scrolling, nowrap horizontal scrolling, viewport reset, and pointer-sensitive mouse-wheel behavior.
+- Preserved the established `Ctrl+O(letter) sort` hint when the preview is hidden.
+
 # htail 0.16.6
 
 ## Global search preview

@@ -23,7 +23,7 @@ from .globwatch import DynamicGlob, has_magic
 from .layout import LAYOUTS, Rect, pane_rects, resolve_auto
 from .pane import Pane, StreamPane
 from .extras import is_compressed_path, markdown_outline, parse_duration, syntax_path_for_source
-from .global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, fuzzy_backend, render_global_search, search_corpus
+from .global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, fuzzy_backend, preview_text_width, render_global_search, search_corpus
 from .searching import GlobalSearchMatch, SEARCH_BOOLEAN, SEARCH_FUZZY, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label, simple_escape
 from .sources import CommandFollower, CompressedFollower, SSHFollower, StreamFollower
 from .watcher import FileFollower, WatchNotice, WatchUpdate
@@ -425,6 +425,10 @@ class MultiApp:
         self.global_search_sort = SORT_FILE
         self.global_search_file_filter: Optional[int] = None
         self.global_search_preview = True
+        self.global_search_preview_wrap = True
+        self.global_search_preview_scroll = 0
+        self.global_search_preview_hscroll = 0
+        self._global_search_preview_result_key = None
         self.global_search_expanded_pane: Optional[int] = None
         self.global_search_hit_regions: List[Tuple[int, int, int, int, str, int]] = []
         self._global_search_corpus_signature = None
@@ -944,45 +948,119 @@ class MultiApp:
         self._refresh_global_search_results()
         self._expand_selected_global_search_file()
 
+    def _selected_global_search_result(self) -> Optional[GlobalSearchMatch]:
+        self._refresh_global_search_results()
+        if not self.global_search_results:
+            return None
+        selected = min(max(0, self.global_search_selected), len(self.global_search_results) - 1)
+        return self.global_search_results[selected]
+
+    def _reset_global_search_preview_view(self) -> None:
+        self.global_search_preview_scroll = 0
+        self.global_search_preview_hscroll = 0
+        self._global_search_preview_result_key = None
+
+    def _sync_global_search_preview_result(self) -> None:
+        result = self._selected_global_search_result()
+        key = None if result is None else (
+            result.pane_index,
+            result.source_index,
+            result.match_start,
+            result.match_end,
+            result.text,
+        )
+        if key != self._global_search_preview_result_key:
+            self._global_search_preview_result_key = key
+            self.global_search_preview_scroll = 0
+            self.global_search_preview_hscroll = 0
+
+    def _scroll_global_search_preview(self, delta: int) -> None:
+        self._sync_global_search_preview_result()
+        result = self._selected_global_search_result()
+        if result is None or result.pane_index >= len(self.panes):
+            return
+        lines = self.panes[result.pane_index].snapshot_raw
+        if not lines:
+            return
+        selected_index = min(max(0, result.source_index), len(lines) - 1)
+        current_anchor = min(
+            max(0, selected_index + self.global_search_preview_scroll),
+            len(lines) - 1,
+        )
+        new_anchor = min(max(0, current_anchor + delta), len(lines) - 1)
+        self.global_search_preview_scroll = new_anchor - selected_index
+
+    def _scroll_global_search_preview_horizontal(self, delta: int) -> None:
+        if self.global_search_preview_wrap:
+            return
+        self._sync_global_search_preview_result()
+        result = self._selected_global_search_result()
+        if result is None or result.pane_index >= len(self.panes):
+            return
+        lines = self.panes[result.pane_index].snapshot_raw
+        if not lines:
+            return
+        source_index = min(max(0, result.source_index), len(lines) - 1)
+        raw_text = lines[source_index].rstrip("\r\n")
+        text = raw_text.replace("\t", "    ")
+        width, height, _ = self.content_dimensions()
+        room = preview_text_width(width, height, len(lines))
+        if room <= 0:
+            return
+        match_start = len(raw_text[:result.match_start].replace("\t", "    "))
+        max_left = max(0, len(text) - room)
+        base_left = max(0, min(match_start - room // 3, max_left))
+        current_left = max(0, min(base_left + self.global_search_preview_hscroll, max_left))
+        new_left = max(0, min(current_left + delta, max_left))
+        self.global_search_preview_hscroll = new_left - base_left
+
+    def _global_search_hit_at(self, x: int, y: int) -> Optional[Tuple[str, int]]:
+        for x1, y1, x2, y2, kind, value in self.global_search_hit_regions:
+            if x1 <= x < x2 and y1 <= y < y2:
+                return kind, value
+        return None
+
     def _handle_global_search_mouse(self, event: MouseEvent) -> None:
         if event.button == "left" and not event.pressed:
             return
+        hit = self._global_search_hit_at(event.x, event.y)
         if event.button in ("wheel_up", "wheel_down"):
-            self._refresh_global_search_results()
-            if self.global_search_results:
-                delta = -3 if event.button == "wheel_up" else 3
-                self.global_search_selected = min(
-                    max(0, self.global_search_selected + delta), len(self.global_search_results) - 1
-                )
-                self._expand_selected_global_search_file()
-                self.dirty = True
-            return
-        if event.button != "left":
-            return
-        for x1, y1, x2, y2, kind, value in self.global_search_hit_regions:
-            if not (x1 <= event.x < x2 and y1 <= event.y < y2):
-                continue
-            self._refresh_global_search_results()
-            if kind == "file":
-                if self.global_search_expanded_pane == value:
-                    self.global_search_expanded_pane = None
-                else:
-                    self.global_search_expanded_pane = value
-                    match_index = next(
-                        (i for i, result in enumerate(self.global_search_results) if result.pane_index == value),
-                        None,
+            delta = -3 if event.button == "wheel_up" else 3
+            if hit is not None and hit[0] == "preview":
+                self._scroll_global_search_preview(delta)
+            else:
+                self._refresh_global_search_results()
+                if self.global_search_results:
+                    self.global_search_selected = min(
+                        max(0, self.global_search_selected + delta), len(self.global_search_results) - 1
                     )
-                    if match_index is not None:
-                        self.global_search_selected = match_index
-            elif kind == "result" and 0 <= value < len(self.global_search_results):
-                self.global_search_selected = value
-                if self.global_search_sort == SORT_FILE:
-                    self.global_search_expanded_pane = self.global_search_results[value].pane_index
+                    self._expand_selected_global_search_file()
             self.dirty = True
             return
+        if event.button != "left" or hit is None:
+            return
+        kind, value = hit
+        self._refresh_global_search_results()
+        if kind == "file":
+            if self.global_search_expanded_pane == value:
+                self.global_search_expanded_pane = None
+            else:
+                self.global_search_expanded_pane = value
+                match_index = next(
+                    (i for i, result in enumerate(self.global_search_results) if result.pane_index == value),
+                    None,
+                )
+                if match_index is not None:
+                    self.global_search_selected = match_index
+        elif kind == "result" and 0 <= value < len(self.global_search_results):
+            self.global_search_selected = value
+            if self.global_search_sort == SORT_FILE:
+                self.global_search_expanded_pane = self.global_search_results[value].pane_index
+        self.dirty = True
 
     def _global_search_lines(self, width: int, height: int) -> List[str]:
         self._refresh_global_search_results()
+        self._sync_global_search_preview_result()
         self.global_search_hit_regions.clear()
         if self.global_search_file_filter is None:
             file_label = "[All files]"
@@ -1012,6 +1090,9 @@ class MultiApp:
                 panes=self.panes,
                 preview_enabled=self.global_search_preview,
                 color=self.color,
+                preview_wrap=self.global_search_preview_wrap,
+                preview_scroll=self.global_search_preview_scroll,
+                preview_hscroll=self.global_search_preview_hscroll,
                 expanded_pane=self.global_search_expanded_pane,
                 hit_regions=self.global_search_hit_regions,
             )
@@ -1102,8 +1183,9 @@ class MultiApp:
             "",
             "Global",
             "  g                  global search: Simple / Regex / Boolean / Fuzzy",
-            "                     ↑↓ match · Shift+↑↓ file · Ctrl+T case · Ctrl+O (letter O) sort",
-            "                     Ctrl+F filter · Ctrl+P preview · click file header to expand/collapse",
+            "                     ↑↓ match · Shift+↑↓ file · Ctrl+↑↓/Pg preview context",
+            "                     Ctrl+W wrap · ←→ preview hscroll when nowrap · mouse wheel follows pointer",
+            "                     Ctrl+T case · Ctrl+O sort · Ctrl+F filter · Ctrl+P preview",
             "  u                  check/install updates",
             "  ?                  close help",
             "  q                  quit",
@@ -1283,7 +1365,7 @@ class MultiApp:
         if self.palette_active:
             status = ["COMMAND PALETTE · type to filter · ↑↓ select · Enter apply · Esc close", "Background watching continues while this dialog is open"]
         elif self.global_search_active:
-            status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ match · Shift+↑↓ file · Enter jump · Tab mode · Ctrl+T case · Ctrl+O(letter) sort · Ctrl+F file · Ctrl+P preview · Esc close", "Background watching continues while this dialog is open"]
+            status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ match · Shift+↑↓ file · Ctrl+↑↓/Pg preview · Ctrl+W wrap · ←→ hscroll · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close", "Background watching continues while this dialog is open"]
         elif self.prompt_mode:
             if self.prompt_mode == "search":
                 case = "NoCase" if self.prompt_ignore_case else "Case"
@@ -1439,6 +1521,28 @@ class MultiApp:
                 return False
             if key == "CTRL_P":
                 self.global_search_preview = not self.global_search_preview
+                self.dirty = True
+                return False
+            if key == "CTRL_W":
+                self.global_search_preview_wrap = not self.global_search_preview_wrap
+                if self.global_search_preview_wrap:
+                    self.global_search_preview_hscroll = 0
+                self.dirty = True
+                return False
+            if key in ("CTRL_UP", "CTRL_DOWN", "CTRL_PAGEUP", "CTRL_PAGEDOWN"):
+                delta = {
+                    "CTRL_UP": -1,
+                    "CTRL_DOWN": 1,
+                    "CTRL_PAGEUP": -8,
+                    "CTRL_PAGEDOWN": 8,
+                }[key]
+                self._scroll_global_search_preview(delta)
+                self.dirty = True
+                return False
+            if key in ("LEFT", "RIGHT", "CTRL_LEFT", "CTRL_RIGHT"):
+                if not self.global_search_preview_wrap:
+                    delta = -4 if key in ("LEFT", "CTRL_LEFT") else 4
+                    self._scroll_global_search_preview_horizontal(delta)
                 self.dirty = True
                 return False
             if key in ("SHIFT_UP", "SHIFT_DOWN"):
@@ -1631,6 +1735,7 @@ class MultiApp:
             self.global_search_active = True
             self.global_search_selected = 0
             self.global_search_file_filter = None
+            self._reset_global_search_preview_view()
             self.global_search_sort = SORT_RELEVANCE if self.global_search_mode == SEARCH_FUZZY else SORT_FILE
             self._refresh_global_search_results()
             self._expand_selected_global_search_file()
