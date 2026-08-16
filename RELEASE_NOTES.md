@@ -1,12 +1,14 @@
-# htail 0.16.2
+# htail 0.16.3
 
-## Bug fixes
+## Update reliability
 
-- Fixed the global-search grouped-results renderer crashing on the first matching query in Simple, Regex and Boolean modes. Group members are `(index, result)` pairs; the renderer now reads fuzzy score metadata from the contained result rather than from the tuple itself.
-- Strengthened the previous global-search containment regression so an error fallback no longer counts as a successful render.
+- Hardened application selection after self-update. The release launcher now explicitly loads the application embedded in the current wrapper and discards any stale `htail_app` package that may have been preloaded by an inherited Python environment.
+- Extracted application caches are validated against the wrapper version and runtime manifest and are automatically rebuilt if stale or incomplete.
+- The updater now verifies both the installed wrapper version and the installed application with `--bundle-self-test` before declaring success. Failed verification restores the previous executable from backup.
+- Bundle self-test now checks wrapper/application version agreement and the active application path in addition to the RapidFuzz runtime.
 
-## Validation
+## Regression coverage
 
-- Added an end-to-end live-render matrix covering Simple, Regex, Boolean and Fuzzy search in both color and no-color modes.
-- The matrix renders the complete TUI after every typed character and after selection, case, file-filter, preview and fuzzy sort controls, and explicitly rejects any search-rendering error panel.
-- Existing full test suite, v0.9.0 differential behavior gate, standalone core build and current-ABI native-runtime smoke test remain required before release.
+- Added a hostile inherited-environment test that preloads a fake stale `htail_app` through `sitecustomize`; the bundled launcher must still select the current application.
+- Added extracted-cache repair and updater rollback coverage.
+- The full-frame global-search acceptance matrix introduced in 0.16.2 remains part of the release gate.
