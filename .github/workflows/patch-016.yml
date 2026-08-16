@@ -1,0 +1,54 @@
+name: Stage htail 0.16.0
+
+on:
+  push:
+    branches:
+      - feature/global-search-redesign-0.16.0
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Apply product patch
+        run: |
+          if grep -q 'VERSION = "0.16.0"' src/htail_app/__init__.py; then
+            echo "0.16 application patch already applied"
+          else
+            python .github/patch_016.py
+          fi
+      - name: Compile
+        run: python -m compileall -q src tools tests benchmarks
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Compare invariant behavior with v0.9.0
+        env:
+          PYTHONPATH: src
+        run: python benchmarks/reference_compare.py --reference v0.9.0
+      - name: Build extracted-environment release bundle
+        run: python tools/build_release.py --output /tmp/htail
+      - name: Smoke test native dependency bundle
+        run: |
+          python /tmp/htail --version
+          python /tmp/htail --bundle-self-test
+      - name: Commit product patch
+        run: |
+          if git diff --quiet -- src; then
+            echo "no product patch to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src
+          git commit -m "Implement htail 0.16 global search core"
+          git push origin HEAD:feature/global-search-redesign-0.16.0
