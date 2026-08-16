@@ -1,18 +1,16 @@
-# htail 0.16.0
+# htail 0.16.1
 
-## New features
+## Bug fixes
 
-- Redesigned global search as a structured two-pane TUI: search controls and ranked/grouped results on the left, source context preview on the right. Narrow terminals automatically drop the preview rather than squeezing both panes.
-- Added **Fuzzy** as a fourth global-search mode alongside Simple, Regex and Boolean.
-- Fuzzy results use bundled RapidFuzz C++ scoring and default to a flat global **Relevance** ranking across all files.
-- Fuzzy search can switch to **File** organization; file groups are ordered by their best score and the selected file expands while the others stay compact.
-- Added interactive global-search controls for Case/NoCase (`Ctrl+T`), Relevance/File ordering (`Ctrl+O`), file filtering (`Ctrl+F`) and preview visibility (`Ctrl+P`).
-- Global search now caches its candidate corpus and search state so unchanged files are not rebuilt on every redraw.
+- Fixed standalone `Esc` on POSIX/WSL terminals. Escape-sequence parsing no longer blocks waiting for another key, so Esc reliably closes the command palette, global search, local search/highlight, layout chooser, help and update confirmation.
+- Global-search backend and rendering failures are now contained inside the search workspace instead of terminating htail.
+- Added direct regression coverage for color-enabled global-search typing and for Esc across every dismissible modal.
 
-## Distribution
+## Distribution and CI
 
-- Replaced the release zipapp payload with an extracted, hash-addressed application environment under the htail cache. Native Python extensions can now be bundled and imported normally.
-- Added a generic `tools/bundle-requirements.txt` dependency manifest. The release builder resolves wheel dependencies for CPython 3.10–3.14 and embeds a matching vendor directory for each ABI.
-- RapidFuzz 3.14.5 is the first bundled native dependency. The same mechanism can support future dependencies such as NumPy without another packaging redesign.
-- Published release bundles currently target Linux x86-64 and continue to use the system Python interpreter.
-- The repository-level `./htail` is now a lightweight source-checkout launcher; release assets remain the self-contained install/update artifact.
+- Split native dependencies out of the universal `htail` core. Releases now publish a small core plus `htail-runtime-cp310.zip` through `htail-runtime-cp314.zip`; the updater downloads only the runtime matching the Python currently running htail.
+- Runtime download, SHA-256 verification and unpacking now happen inside the update workflow before restart, with visible progress. The small application payload is also pre-extracted before restart.
+- Runtime caches are keyed by the dependency-manifest hash, so later htail updates reuse the prepared native runtime when dependencies are unchanged.
+- A fresh manual installation can bootstrap only its matching runtime if needed. The 0.16.1 wrapper can also directly reuse an already-extracted 0.16.0 RapidFuzz runtime during this transition.
+- Normal CI builds/tests only the current CPython 3.13 runtime asset; release builds still create runtime assets for CPython 3.10–3.14.
+- Native wheels are stored in runtime assets without recompression, eliminating the expensive wheel unzip + DEFLATE-9 recompression step introduced in 0.16.0.
