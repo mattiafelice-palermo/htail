@@ -188,7 +188,22 @@ class InputReader:
                     "H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT",
                     "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END",
                 }
-                return mapping.get(special)
+                key = mapping.get(special)
+                if key is None:
+                    return None
+                try:
+                    import ctypes
+                    VK_CONTROL = 0x11
+                    if ctypes.windll.user32.GetKeyState(VK_CONTROL) & 0x8000:
+                        controlled = {
+                            "UP": "CTRL_UP", "DOWN": "CTRL_DOWN",
+                            "LEFT": "CTRL_LEFT", "RIGHT": "CTRL_RIGHT",
+                            "PAGEUP": "CTRL_PAGEUP", "PAGEDOWN": "CTRL_PAGEDOWN",
+                        }
+                        return controlled.get(key, key)
+                except Exception:
+                    pass
+                return key
             return normalize_plain_key(ch)
         except Exception:
             return None

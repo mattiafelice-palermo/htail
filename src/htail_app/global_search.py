@@ -504,9 +504,12 @@ def render_global_search(
         filter_row += "    " + core.paint(f"Backend: {fuzzy_backend()}", core.DIM, color)
 
     header_rows = [search_row, mode_row, filter_row]
-    footer_text = "↑↓ match · Shift+↑↓ file · Ctrl+↑↓ preview · Ctrl+W wrap · ←→ hscroll · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close"
 
     show_preview = preview_enabled and panel_width >= 96
+    if show_preview:
+        footer_text = "↑↓ match · Shift+↑↓ file · Ctrl+↑↓/Pg preview · Ctrl+W wrap · ←→ hscroll · Enter jump · Ctrl+O(letter) sort · Ctrl+P preview · Esc close"
+    else:
+        footer_text = "↑↓ match · Shift+↑↓ file · Enter jump · Tab mode · Ctrl+T case · Ctrl+O(letter) sort · Ctrl+F file · Ctrl+P preview · Esc close"
     body_height = max(3, panel_height - 8)
     if show_preview:
         left_width = max(40, int((inner - 1) * 0.62))

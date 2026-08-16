@@ -1,45 +1,10 @@
-name: Apply htail 0.16.7 preview changes
+name: Restore app.py (manual only)
 
 on:
-  push:
-    branches:
-      - ux/global-search-preview-scroll-0.16.7
-
-permissions:
-  contents: write
+  workflow_dispatch:
 
 jobs:
-  apply:
-    if: github.actor != 'github-actions[bot]'
+  noop:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ux/global-search-preview-scroll-0.16.7
-          fetch-depth: 0
-      - name: Apply locally validated changes
-        run: |
-          git apply --check .htail-dev/app-0167.patch .htail-dev/other-0167.patch
-          git apply .htail-dev/app-0167.patch .htail-dev/other-0167.patch
-          cp .htail-dev/test_global_search_0167.py tests/test_global_search_0167.py
-          cp .htail-dev/__init__.py src/htail_app/__init__.py
-          cp .htail-dev/RELEASE_NOTES.md RELEASE_NOTES.md
-          git fetch origin main:refs/remotes/origin/main --no-tags
-          git show origin/main:.github/workflows/restore-app.yml > .github/workflows/restore-app.yml
-          rm -rf .htail-dev
-      - name: Verify generated source
-        run: |
-          python -m compileall -q src tests
-          test "$(git hash-object src/htail_app/app.py)" = "8004ca61f44f6fa88282d6d7f7c19023ceff07b3"
-          test "$(git hash-object src/htail_app/global_search.py)" = "0cce83fd76836a75a28398c1cb402376a717cee3"
-          test "$(git hash-object src/htail_app/input.py)" = "d521d3502bb008c49f2fe1d385abf98f7cc91b44"
-          test "$(git hash-object tests/test_global_search_0167.py)" = "052533b5c3d5a1fa83f2a6231c2933bb1e3365e9"
-          test "$(git hash-object src/htail_app/__init__.py)" = "45c4ddf623d5358d30c7b2a3f845bb0d684efb93"
-          test "$(git hash-object RELEASE_NOTES.md)" = "a3bfbee5a968d7e137c10cfe45fecb8cce2647e3"
-      - name: Commit feature
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "htail 0.16.7: wrap and scroll global-search preview"
-          git push origin HEAD:ux/global-search-preview-scroll-0.16.7
+      - run: echo "Manual recovery workflow retained but disabled for pushes."
