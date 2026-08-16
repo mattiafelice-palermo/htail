@@ -425,6 +425,8 @@ class MultiApp:
         self.global_search_sort = SORT_FILE
         self.global_search_file_filter: Optional[int] = None
         self.global_search_preview = True
+        self.global_search_expanded_pane: Optional[int] = None
+        self.global_search_hit_regions: List[Tuple[int, int, int, int, str, int]] = []
         self._global_search_corpus_signature = None
         self._global_search_corpus = []
         self._global_search_cache_key = None
@@ -903,6 +905,33 @@ class MultiApp:
         else:
             self.global_search_selected = 0
 
+    def _expand_selected_global_search_file(self) -> None:
+        if self.global_search_sort != SORT_FILE or not self.global_search_results:
+            if self.global_search_sort != SORT_FILE:
+                self.global_search_expanded_pane = None
+            return
+        selected = min(max(0, self.global_search_selected), len(self.global_search_results) - 1)
+        self.global_search_expanded_pane = self.global_search_results[selected].pane_index
+
+    def _jump_global_search_file(self, backwards: bool) -> None:
+        self._refresh_global_search_results()
+        if not self.global_search_results:
+            return
+        selected = min(max(0, self.global_search_selected), len(self.global_search_results) - 1)
+        current_pane = self.global_search_results[selected].pane_index
+        scan = range(selected - 1, -1, -1) if backwards else range(selected + 1, len(self.global_search_results))
+        target_pane = next(
+            (self.global_search_results[index].pane_index for index in scan if self.global_search_results[index].pane_index != current_pane),
+            None,
+        )
+        if target_pane is None:
+            return
+        self.global_search_selected = next(
+            index for index, result in enumerate(self.global_search_results) if result.pane_index == target_pane
+        )
+        if self.global_search_sort == SORT_FILE:
+            self.global_search_expanded_pane = target_pane
+
     def _cycle_global_search_file_filter(self, backwards: bool = False) -> None:
         choices = [None] + list(range(len(self.panes)))
         try:
@@ -913,9 +942,48 @@ class MultiApp:
         self.global_search_file_filter = choices[(index + delta) % len(choices)] if choices else None
         self.global_search_selected = 0
         self._refresh_global_search_results()
+        self._expand_selected_global_search_file()
+
+    def _handle_global_search_mouse(self, event: MouseEvent) -> None:
+        if event.button == "left" and not event.pressed:
+            return
+        if event.button in ("wheel_up", "wheel_down"):
+            self._refresh_global_search_results()
+            if self.global_search_results:
+                delta = -3 if event.button == "wheel_up" else 3
+                self.global_search_selected = min(
+                    max(0, self.global_search_selected + delta), len(self.global_search_results) - 1
+                )
+                self._expand_selected_global_search_file()
+                self.dirty = True
+            return
+        if event.button != "left":
+            return
+        for x1, y1, x2, y2, kind, value in self.global_search_hit_regions:
+            if not (x1 <= event.x < x2 and y1 <= event.y < y2):
+                continue
+            self._refresh_global_search_results()
+            if kind == "file":
+                if self.global_search_expanded_pane == value:
+                    self.global_search_expanded_pane = None
+                else:
+                    self.global_search_expanded_pane = value
+                    match_index = next(
+                        (i for i, result in enumerate(self.global_search_results) if result.pane_index == value),
+                        None,
+                    )
+                    if match_index is not None:
+                        self.global_search_selected = match_index
+            elif kind == "result" and 0 <= value < len(self.global_search_results):
+                self.global_search_selected = value
+                if self.global_search_sort == SORT_FILE:
+                    self.global_search_expanded_pane = self.global_search_results[value].pane_index
+            self.dirty = True
+            return
 
     def _global_search_lines(self, width: int, height: int) -> List[str]:
         self._refresh_global_search_results()
+        self.global_search_hit_regions.clear()
         if self.global_search_file_filter is None:
             file_label = "[All files]"
         elif 0 <= self.global_search_file_filter < len(self.panes):
@@ -944,6 +1012,8 @@ class MultiApp:
                 panes=self.panes,
                 preview_enabled=self.global_search_preview,
                 color=self.color,
+                expanded_pane=self.global_search_expanded_pane,
+                hit_regions=self.global_search_hit_regions,
             )
         except Exception as exc:
             self.global_search_error = f"{type(exc).__name__}: {exc}"
@@ -1032,7 +1102,8 @@ class MultiApp:
             "",
             "Global",
             "  g                  global search: Simple / Regex / Boolean / Fuzzy",
-            "                     Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview",
+            "                     ↑↓ match · Shift+↑↓ file · Ctrl+T case · Ctrl+O (letter O) sort",
+            "                     Ctrl+F filter · Ctrl+P preview · click file header to expand/collapse",
             "  u                  check/install updates",
             "  ?                  close help",
             "  q                  quit",
@@ -1212,7 +1283,7 @@ class MultiApp:
         if self.palette_active:
             status = ["COMMAND PALETTE · type to filter · ↑↓ select · Enter apply · Esc close", "Background watching continues while this dialog is open"]
         elif self.global_search_active:
-            status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ select · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close", "Background watching continues while this dialog is open"]
+            status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ match · Shift+↑↓ file · Enter jump · Tab mode · Ctrl+T case · Ctrl+O(letter) sort · Ctrl+F file · Ctrl+P preview · Esc close", "Background watching continues while this dialog is open"]
         elif self.prompt_mode:
             if self.prompt_mode == "search":
                 case = "NoCase" if self.prompt_ignore_case else "Case"
@@ -1328,6 +1399,10 @@ class MultiApp:
                 self.palette_buffer += key; self.palette_selected = 0; self._refresh_palette(); self.dirty = True
             return False
 
+        if self.global_search_active and isinstance(event, MouseEvent):
+            self._handle_global_search_mouse(event)
+            return False
+
         if self.global_search_active and not isinstance(event, MouseEvent):
             key = event
             if key == "ESC":
@@ -1340,6 +1415,7 @@ class MultiApp:
                 self.global_search_sort = SORT_RELEVANCE if self.global_search_mode == SEARCH_FUZZY else SORT_FILE
                 self.global_search_selected = 0
                 self._refresh_global_search_results()
+                self._expand_selected_global_search_file()
                 self.dirty = True
                 return False
             if key == "CTRL_T":
@@ -1353,6 +1429,7 @@ class MultiApp:
                     self.global_search_sort = SORT_FILE if self.global_search_sort == SORT_RELEVANCE else SORT_RELEVANCE
                     self.global_search_selected = 0
                     self._refresh_global_search_results()
+                    self._expand_selected_global_search_file()
                 self.dirty = True
                 return False
             if key == "CTRL_F":
@@ -1363,6 +1440,10 @@ class MultiApp:
                 self.global_search_preview = not self.global_search_preview
                 self.dirty = True
                 return False
+            if key in ("SHIFT_UP", "SHIFT_DOWN"):
+                self._jump_global_search_file(key == "SHIFT_UP")
+                self.dirty = True
+                return False
             if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN"):
                 self._refresh_global_search_results()
                 if self.global_search_results:
@@ -1371,6 +1452,7 @@ class MultiApp:
                         max(0, self.global_search_selected + delta),
                         len(self.global_search_results) - 1,
                     )
+                    self._expand_selected_global_search_file()
                 self.dirty = True
                 return False
             if key in ("\r", "\n"):
@@ -1381,12 +1463,14 @@ class MultiApp:
                 self.global_search_buffer = self.global_search_buffer[:-1]
                 self.global_search_selected = 0
                 self._refresh_global_search_results()
+                self._expand_selected_global_search_file()
                 self.dirty = True
                 return False
             if isinstance(key, str) and len(key) == 1 and key.isprintable():
                 self.global_search_buffer += key
                 self.global_search_selected = 0
                 self._refresh_global_search_results()
+                self._expand_selected_global_search_file()
                 self.dirty = True
             return False
 
@@ -1548,6 +1632,7 @@ class MultiApp:
             self.global_search_file_filter = None
             self.global_search_sort = SORT_RELEVANCE if self.global_search_mode == SEARCH_FUZZY else SORT_FILE
             self._refresh_global_search_results()
+            self._expand_selected_global_search_file()
             self.dirty = True
             return False
         if key == "h":

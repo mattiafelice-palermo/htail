@@ -40,6 +40,7 @@ def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
         "\x1b[A": "UP", "\x1b[B": "DOWN", "\x1b[C": "RIGHT", "\x1b[D": "LEFT", "\x1b[5~": "PAGEUP",
         "\x1b[6~": "PAGEDOWN", "\x1b[H": "HOME", "\x1b[F": "END",
         "\x1bOH": "HOME", "\x1bOF": "END", "\x1b[Z": "SHIFT_TAB",
+        "\x1b[1;2A": "SHIFT_UP", "\x1b[1;2B": "SHIFT_DOWN",
         "\x1b": "ESC",
     }
     if seq in mapping:

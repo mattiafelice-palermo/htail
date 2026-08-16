@@ -1,3 +1,17 @@
+# htail 0.16.4
+
+## Global search UX
+
+- Fuzzy relevance results now have explicit `#`, `FILE`, `LINE`, `MATCH`, and `SCORE` column headers, with scores aligned in a fixed right-hand column.
+- Grouped results now have real file expansion state. Click a file header to expand/collapse it; clicking a result selects it.
+- Shift+Up / Shift+Down jumps directly between files with matches, while Up / Down continues to move match-by-match.
+- Global-search mouse wheel navigation is supported inside the results list.
+- The sort shortcut is now displayed as `Ctrl+O(letter)` / `Ctrl+O (letter O)` so it cannot be confused with terminal `Ctrl+0` zoom/reset shortcuts.
+
+## Regression coverage
+
+- Added renderer, shifted-key decoding, file-jump, expansion/collapse, and mouse hit-target tests.
+
 # htail 0.16.3
 
 ## Update reliability

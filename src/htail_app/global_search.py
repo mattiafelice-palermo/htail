@@ -192,17 +192,34 @@ def _highlight_span(text: str, start: int, end: int, *, selected: bool, color: b
     return text[:start] + on + text[start:end] + off + text[end:]
 
 
+def _flat_column_widths(width: int) -> Tuple[int, int, int, int]:
+    filename_width = max(12, min(28, width // 4))
+    line_width = 6
+    score_width = 5
+    fixed = 2 + 3 + 2 + filename_width + 1 + line_width + 2 + 2 + score_width
+    preview_width = max(8, width - fixed)
+    return filename_width, line_width, preview_width, score_width
+
+
+def _flat_result_header(width: int) -> str:
+    filename_width, line_width, preview_width, score_width = _flat_column_widths(width)
+    row = (
+        f"  {'#':>3}  {'FILE':<{filename_width}.{filename_width}} "
+        f"{'LINE':>{line_width}}  {'MATCH':<{preview_width}.{preview_width}}  {'SCORE':>{score_width}}"
+    )
+    return _pad(row, width)
+
+
 def _flat_result_rows(
     results: Sequence[GlobalSearchMatch], selected: int, rows: int, width: int, color: bool
-) -> List[str]:
+) -> Tuple[List[str], List[Tuple[str, int]]]:
     if not results:
-        return []
+        return [], []
     start = max(0, selected - rows // 2)
     start = min(start, max(0, len(results) - rows))
     out: List[str] = []
-    filename_width = max(12, min(28, width // 3))
-    line_width = 6
-    preview_width = max(8, width - filename_width - line_width - 7)
+    tags: List[Tuple[str, int]] = []
+    filename_width, line_width, preview_width, score_width = _flat_column_widths(width)
     for index in range(start, min(len(results), start + rows)):
         result = results[index]
         selected_row = index == selected
@@ -220,20 +237,29 @@ def _flat_result_rows(
         else:
             local_start, local_end = result.match_start, result.match_end
         preview = _highlight_span(preview, local_start, local_end, selected=selected_row, color=color)
-        score = f" {result.score:3.0f}" if result.score is not None else ""
+        score = f"{result.score:>{score_width}.0f}" if result.score is not None else " " * score_width
         marker = "▌" if selected_row else " "
-        row = f"{marker} {index + 1:>3}  {result.pane_name:<{filename_width}.{filename_width}} {result.source_index + 1:>{line_width}}  {preview}{score}"
+        row = (
+            f"{marker} {index + 1:>3}  {result.pane_name:<{filename_width}.{filename_width}} "
+            f"{result.source_index + 1:>{line_width}}  {_pad(preview, preview_width)}  {score}"
+        )
         if selected_row and color:
             row = "\x1b[1;97;48;5;24m" + row + core.RESET
         out.append(_pad(row, width))
-    return out
+        tags.append(("result", index))
+    return out, tags
 
 
 def _grouped_result_rows(
-    results: Sequence[GlobalSearchMatch], selected: int, rows: int, width: int, color: bool
-) -> List[str]:
+    results: Sequence[GlobalSearchMatch],
+    selected: int,
+    rows: int,
+    width: int,
+    color: bool,
+    expanded_pane: Optional[int],
+) -> Tuple[List[str], List[Tuple[str, int]]]:
     if not results:
-        return []
+        return [], []
     groups: List[Tuple[int, str, List[Tuple[int, GlobalSearchMatch]]]] = []
     group_map = {}
     for index, result in enumerate(results):
@@ -245,16 +271,20 @@ def _grouped_result_rows(
     header_count = min(len(groups), rows)
     active_slots = max(1, rows - header_count)
     out: List[str] = []
+    tags: List[Tuple[str, int]] = []
     for pane_index, pane_name, members in groups:
-        active = pane_index == selected_pane
-        symbol = "▼" if active else "▶"
+        expanded = pane_index == expanded_pane
+        selected_group = pane_index == selected_pane
+        symbol = "▼" if expanded else "▶"
         best = max((member.score or 0.0) for _, member in members)
         score_suffix = f" · best {best:.0f}" if members and members[0][1].score is not None else ""
         header = f"{symbol} {pane_name}  {len(members)}{score_suffix}"
-        out.append(_pad(core.paint(header, core.BOLD_LIGHT_CYAN if active else core.DIM, color), width))
-        if not active:
-            if len(out) >= rows:
-                break
+        style = core.BOLD_LIGHT_CYAN if selected_group else core.DIM
+        out.append(_pad(core.paint(header, style, color), width))
+        tags.append(("file", pane_index))
+        if len(out) >= rows:
+            break
+        if not expanded:
             continue
         selected_member_pos = next((i for i, (global_index, _) in enumerate(members) if global_index == selected), 0)
         member_start = max(0, selected_member_pos - active_slots // 2)
@@ -282,11 +312,12 @@ def _grouped_result_rows(
             if selected_row and color:
                 row = "\x1b[1;97;48;5;24m" + row + core.RESET
             out.append(_pad(row, width))
+            tags.append(("result", global_index))
             if len(out) >= rows:
                 break
         if len(out) >= rows:
             break
-    return out[:rows]
+    return out[:rows], tags[:rows]
 
 
 def _preview_rows(
@@ -335,6 +366,8 @@ def render_global_search(
     panes: Sequence[object],
     preview_enabled: bool,
     color: bool,
+    expanded_pane: Optional[int] = None,
+    hit_regions: Optional[List[Tuple[int, int, int, int, str, int]]] = None,
 ) -> List[str]:
     if width < 40 or height < 10:
         return [" " * width for _ in range(height)]
@@ -366,7 +399,7 @@ def render_global_search(
         filter_row += "    " + core.paint(f"Backend: {fuzzy_backend()}", core.DIM, color)
 
     header_rows = [search_row, mode_row, filter_row]
-    footer_text = "↑↓ select · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close"
+    footer_text = "↑↓ match · Shift+↑↓ file · Enter jump · Tab mode · Ctrl+T case · Ctrl+O(letter) sort · Ctrl+F file · Ctrl+P preview · Esc close"
 
     show_preview = preview_enabled and panel_width >= 96
     body_height = max(3, panel_height - 8)
@@ -378,19 +411,41 @@ def render_global_search(
         right_width = 0
 
     selected_result = results[selected] if results and 0 <= selected < len(results) else None
+    left_tags: List[Optional[Tuple[str, int]]] = []
     if error:
         left_rows = [core.paint(f"Invalid search: {error}", core.BOLD_YELLOW, color)]
+        left_tags = [None]
     elif not query:
         left_rows = [core.paint("Type to search every currently watched file.", core.DIM, color)]
+        left_tags = [None]
     elif not results:
         left_rows = [core.paint("No matches.", core.DIM, color)]
+        left_tags = [None]
     elif sort_mode == SORT_RELEVANCE:
-        left_rows = _flat_result_rows(results, selected, body_height - 1, left_width, color)
+        result_rows, result_tags = _flat_result_rows(results, selected, max(1, body_height - 2), left_width, color)
+        left_rows = [core.paint(_flat_result_header(left_width), core.DIM, color)] + result_rows
+        left_tags = [None] + result_tags
     else:
-        left_rows = _grouped_result_rows(results, selected, body_height - 1, left_width, color)
+        left_rows, grouped_tags = _grouped_result_rows(
+            results, selected, max(1, body_height - 1), left_width, color, expanded_pane
+        )
+        left_tags = list(grouped_tags)
     left_heading = "RESULTS — best matches" if sort_mode == SORT_RELEVANCE else "RESULTS — grouped by file"
     left_rows = [core.paint(left_heading, core.BOLD_LIGHT_CYAN, color)] + left_rows
+    left_tags = [None] + left_tags
     left_rows = left_rows[:body_height] + [""] * max(0, body_height - len(left_rows))
+    left_tags = left_tags[:body_height] + [None] * max(0, body_height - len(left_tags))
+
+    if hit_regions is not None:
+        hit_regions.clear()
+        body_y = top_margin + 5
+        content_x1 = left_margin + 1
+        content_x2 = content_x1 + left_width
+        for offset, tag in enumerate(left_tags):
+            if tag is None:
+                continue
+            kind, value = tag
+            hit_regions.append((content_x1, body_y + offset, content_x2, body_y + offset + 1, kind, value))
 
     if show_preview:
         right_rows = [core.paint("PREVIEW", core.BOLD_LIGHT_CYAN, color)]
