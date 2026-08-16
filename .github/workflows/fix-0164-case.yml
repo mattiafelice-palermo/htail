@@ -1,0 +1,64 @@
+name: Tighten htail 0.16.4 case toggle
+
+on:
+  push:
+    branches:
+      - ux/global-search-0164
+    paths:
+      - .github/workflows/fix-0164-case.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Patch case-toggle expansion
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/htail_app/app.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''            if key == "CTRL_T":
+              self.global_search_ignore_case = not self.global_search_ignore_case
+              self.global_search_selected = 0
+              self._refresh_global_search_results()
+              self.dirty = True
+              return False
+          '''
+          new = '''            if key == "CTRL_T":
+              self.global_search_ignore_case = not self.global_search_ignore_case
+              self.global_search_selected = 0
+              self._refresh_global_search_results()
+              self._expand_selected_global_search_file()
+              self.dirty = True
+              return False
+          '''
+          # Normalize indentation in the literal anchors to the source's 12/16-space levels.
+          old = old.replace('\n              ', '\n                ').replace('            if key', '            if key')
+          new = new.replace('\n              ', '\n                ').replace('            if key', '            if key')
+          if old not in text:
+              raise SystemExit('case-toggle anchor not found')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Test
+        run: |
+          python -m pip install --disable-pip-version-check RapidFuzz==3.14.5
+          PYTHONPATH=src python -m unittest discover -s tests -v
+          PYTHONPATH=src python benchmarks/reference_compare.py --reference v0.9.0
+      - name: Commit and remove helper
+        run: |
+          rm -f .github/workflows/fix-0164-case.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Keep grouped expansion aligned after case toggle"
+          git push origin HEAD:ux/global-search-0164
