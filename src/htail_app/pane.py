@@ -131,9 +131,11 @@ class Pane:
         idle_warn: float,
         display_name: Optional[str] = None,
         heartbeat_seconds: float = 0.0,
+        source_label: Optional[str] = None,
     ) -> None:
         self.path = path
         self.display_name = display_name
+        self.source_label = source_label
         self.highlighter = highlighter
         self.display_filter = display_filter
         self.color = color
@@ -686,6 +688,28 @@ class Pane:
         self.waiting = False
         self.missing = False
 
+    def replace_source_snapshot(self, raw_lines: Sequence[str]) -> None:
+        """Reset display history while preserving per-pane viewing preferences."""
+        self.lines.clear()
+        self.updates.clear()
+        self.top = 0
+        self.unseen_updates = 0
+        self.last_update_monotonic = None
+        self.watch_started_monotonic = time.monotonic()
+        self.waiting = False
+        self.missing = False
+        self._activity.clear()
+        self._pending_anchor_logical = None
+        self._snapshot_top = 0
+        self.snapshot_raw = []
+        self.snapshot_changed.clear()
+        self.snapshot_update_header = None
+        self.prefer_snapshot = False
+        self._mark_layout_dirty()
+        self._snapshot_layout_dirty = True
+        self.add_initial(raw_lines)
+        self.set_snapshot(raw_lines)
+
     def _max_top(self, body_height: int) -> int:
         """Last legal top row that still keeps EOF inside the viewport."""
         return max(0, len(self._visual_lines) - max(0, body_height))
@@ -986,6 +1010,8 @@ class Pane:
         else:
             state = "PAUSED" if self.paused else "LIVE"
         parts = [f"{index + 1}:{self.name}", state, self.follow_mode.upper()]
+        if self.source_label:
+            parts.append(self.source_label)
         if self.source_status:
             parts.append(self.source_status)
         if self.show_line_numbers:
