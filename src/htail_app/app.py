@@ -24,6 +24,7 @@ from .layout import LAYOUTS, Rect, pane_rects, resolve_auto
 from .pane import Pane, StreamPane
 from .extras import is_compressed_path, markdown_outline, parse_duration, syntax_path_for_source
 from .global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, fuzzy_backend, preview_text_width, render_global_search, search_corpus
+from .git_remote import GitFileContext, GitRemoteFollower, GitRemoteRef, discover_git_file, list_remote_refs
 from .searching import GlobalSearchMatch, SEARCH_BOOLEAN, SEARCH_FUZZY, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label, simple_escape
 from .sources import CommandFollower, CompressedFollower, SSHFollower, StreamFollower
 from .watcher import FileFollower, WatchNotice, WatchUpdate
@@ -439,6 +440,10 @@ class MultiApp:
         self.palette_buffer = ""
         self.palette_selected = 0
         self.palette_items: List[PaletteItem] = []
+        self._git_context_cache: Dict[Path, Optional[GitFileContext]] = {}
+        self._git_source_context: Optional[GitFileContext] = None
+        self._git_source_refs: List[GitRemoteRef] = []
+        self._git_source_warning: Optional[str] = None
         self._last_frame: Optional[List[str]] = None
         self._last_frame_geometry: Optional[Tuple[int, int]] = None
         self.render_rows_written = 0
@@ -745,6 +750,17 @@ class MultiApp:
                 PaletteItem(("  " * max(0, entry.level - 1)) + f"{entry.text}", "outline-jump", entry.source_index, f"line {entry.source_index + 1}")
                 for entry in markdown_outline(pane.snapshot_raw)
             ]
+        if self.palette_mode == "git-source":
+            context = self._git_source_context
+            if context is None:
+                return []
+            current = pane.source_label or "LOCAL"
+            local_label = "✓ Local working tree" if current == "LOCAL" else "Local working tree"
+            items = [PaletteItem(local_label, "git-source-select", None, context.relative_path)]
+            for ref in self._git_source_refs:
+                label = f"✓ {ref.label}" if current == ref.label else ref.label
+                items.append(PaletteItem(label, "git-source-select", (ref.remote, ref.branch), context.relative_path))
+            return items
         items = [
             PaletteItem("Markdown outline", "outline", detail="jump to a heading"),
             PaletteItem("Toggle wrap", "wrap", detail="wrap / horizontal scrolling"),
@@ -754,8 +770,83 @@ class MultiApp:
             PaletteItem("Toggle CHANGES / TAIL follow mode", "follow"),
             PaletteItem("Clear active search", "clear-search"),
         ]
+        if self._git_context_for_active_pane() is not None:
+            items.append(PaletteItem("Switch file source…", "git-source", detail="local / remote Git branch"))
         items.extend(PaletteItem(f"Focus pane {i + 1}: {candidate.name}", "focus", i) for i, candidate in enumerate(self.panes))
         return items
+
+    def _git_context_for_active_pane(self) -> Optional[GitFileContext]:
+        if self.layout == "stream" or not self.panes or self.focus >= len(self.followers):
+            return None
+        follower = self.followers[self.focus]
+        if isinstance(follower, GitRemoteFollower):
+            return follower.context
+        if not isinstance(follower, FileFollower):
+            return None
+        path = self.panes[self.focus].path.expanduser().resolve()
+        if path not in self._git_context_cache:
+            self._git_context_cache[path] = discover_git_file(path)
+        context = self._git_context_cache[path]
+        return context if context is not None and context.remotes else None
+
+    def _open_git_source_palette(self) -> None:
+        context = self._git_context_for_active_pane()
+        if context is None:
+            self.set_message("selected file has no Git remote")
+            self.palette_active = False
+            return
+        refs, warning = list_remote_refs(context)
+        self._git_source_context = context
+        self._git_source_refs = refs
+        self._git_source_warning = warning
+        self.palette_mode = "git-source"
+        self.palette_buffer = ""
+        self.palette_selected = 0
+        self._refresh_palette()
+        if warning and not refs:
+            self.set_message(warning, 6.0)
+
+    def _replace_active_source(self, follower: object, initial_lines: Sequence[str], source_label: Optional[str]) -> None:
+        index = self.focus
+        pane = self.panes[index]
+        old = self.followers[index]
+        close = getattr(old, "close", None)
+        if callable(close):
+            close()
+        self.followers[index] = follower
+        pane.source_label = source_label
+        pane.source_status = ""
+        pane.replace_source_snapshot(initial_lines)
+        pane.set_message(f"source: {source_label or 'LOCAL'}", 4.0)
+        self._global_search_corpus_signature = None
+        self._global_search_cache_key = None
+
+    def _switch_active_git_source(self, value: object) -> None:
+        if self._git_source_context is None:
+            return
+        pane = self.active_pane()
+        if value is None:
+            follower = FileFollower(pane.path, self.args)
+            notice = follower.initialize_if_available()
+            if notice is None:
+                self._replace_active_source(follower, [], None)
+                pane.waiting = True
+                pane.set_message("LOCAL · waiting for file", 4.0)
+                return
+            if notice.kind == "error":
+                self.set_message(notice.text, 6.0)
+                return
+            self.native_watch.add_file(pane.path)
+            self._replace_active_source(follower, follower.previous, None)
+            return
+
+        remote, branch = value
+        follower = GitRemoteFollower(self._git_source_context, str(remote), str(branch), self.args)
+        notice = follower.initialize_if_available()
+        if notice.kind == "error":
+            self.set_message(notice.text, 6.0)
+            return
+        self._replace_active_source(follower, follower.previous, follower.label)
 
     @staticmethod
     def _palette_matches(label: str, query: str) -> bool:
@@ -792,6 +883,9 @@ class MultiApp:
                 self.set_message("no Markdown headings found")
                 self.palette_active = False
             return
+        if item.action == "git-source":
+            self._open_git_source_palette()
+            return
         if item.action == "outline-jump":
             pane.jump_to_source_line(int(item.value), inner_w, body_h)
         elif item.action == "wrap":
@@ -809,13 +903,23 @@ class MultiApp:
             pane.set_message("search cleared")
         elif item.action == "focus":
             self.focus = int(item.value)
+        elif item.action == "git-source-select":
+            self._switch_active_git_source(item.value)
         self.palette_active = False
         self.dirty = True
 
     def _palette_lines(self, width: int, height: int) -> List[str]:
         self._refresh_palette()
-        title = "Markdown outline" if self.palette_mode == "outline" else "Command palette"
+        if self.palette_mode == "outline":
+            title = "Markdown outline"
+        elif self.palette_mode == "git-source":
+            path = self._git_source_context.relative_path if self._git_source_context else "file"
+            title = f"File source · {path}"
+        else:
+            title = "Command palette"
         content = [core.paint("> " + self.palette_buffer + "▌", core.BOLD_LIGHT_CYAN, self.color), ""]
+        if self.palette_mode == "git-source" and self._git_source_warning:
+            content.extend([core.paint("Remote query warning: " + self._git_source_warning, core.BOLD_YELLOW, self.color), ""])
         if not self.palette_items:
             content.append(core.paint("No matches", core.DIM, self.color))
         else:
@@ -1168,6 +1272,7 @@ class MultiApp:
             "",
             "Focused pane",
             "  :                  command palette / Markdown outline",
+            "                     Git files: switch LOCAL / remote branch in palette",
             "  /                  inline search; Tab cycles Simple / Regex / Boolean",
             "  Ctrl+T             toggle Case / NoCase inside local search",
             "  *                  search selected match / current word",

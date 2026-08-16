@@ -1,3 +1,19 @@
+# htail 0.16.8
+
+## Git remote file sources
+
+- Files opened from a Git working tree can now switch source from the local working copy to the same repository-relative file on a remote branch.
+- The command palette exposes `Switch file source…`, discovers configured remotes and branches, and keeps the file identity fixed so users never need to re-enter its path.
+- Remote-backed panes poll the selected remote branch, fetch only when its head changes, and feed the resulting Git blob through htail's existing snapshot/diff pipeline.
+- Remote-backed pane titles show the selected `remote/branch`; the source picker marks **Local working tree** explicitly and can switch the same pane back without changing normal local-pane titles.
+- Remote authentication and transport remain owned by the user's normal Git configuration, SSH agent, and credential helpers.
+
+## Resilience and coverage
+
+- Remote branch queries fall back to cached remote-tracking refs when a live query fails.
+- Missing remote files and transient Git errors keep the last good snapshot visible instead of terminating htail.
+- Added local bare-repository regression coverage for repository discovery, branch selection, source switching, and remote update tracking.
+
 # htail 0.16.7
 
 ## Global search preview navigation

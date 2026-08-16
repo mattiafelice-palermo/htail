@@ -198,7 +198,9 @@ See `docs/NEXT.md` for deliberately deferred ideas.
 
 ### 0.15 inspection and source features
 
-Press `:` for the command palette. It includes a Markdown heading outline, per-pane wrap and line-number toggles, heartbeat configuration, follow mode, search clearing, search-selected/current-word, and pane switching. The outline jumps directly to headings in the current Markdown snapshot.
+Press `:` for the command palette. It includes a Markdown heading outline, per-pane wrap and line-number toggles, heartbeat configuration, follow mode, search clearing, search-selected/current-word, pane switching, and Git source switching when the selected file belongs to a repository with remotes. The outline jumps directly to headings in the current Markdown snapshot.
+
+For a local file inside a Git repository, choose **Switch file source…** to view the same repository-relative path from `origin/main` or another remote branch without typing the path again. Remote-backed pane titles show the selected `remote/branch`; the source picker marks **Local working tree** when the pane uses the normal local file. Remote-backed panes check the branch head periodically and use normal Git authentication/SSH/credential-helper configuration; choosing **Local working tree** switches the same pane back.
 
 Search now has three modes: **Simple**, **Regex**, and **Boolean**. `Tab` cycles them. Boolean mode accepts `AND`, `OR`, `NOT`, parentheses, quoted phrases, and implicit AND; individual terms use the same friendly wildcard semantics as Simple search. `*` searches the active selected match, or a useful token at the current viewport when there is no selected match.
 
