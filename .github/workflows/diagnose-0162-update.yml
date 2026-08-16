@@ -1,4 +1,4 @@
-name: Diagnose published 0.16.1 -> 0.16.2 update
+name: Diagnose published 0.16.2 -> 0.16.3 hostile update
 
 on:
   push:
@@ -18,56 +18,67 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Exercise published updater and inherited restart environment
+      - name: Exercise published updater with a preloaded stale app
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           CACHE="$RUNNER_TEMP/htail-cache"
-          mkdir -p "$RUNNER_TEMP/old"
-          gh release download v0.16.1 --repo mattiafelice-palermo/htail --pattern htail --dir "$RUNNER_TEMP/old" --clobber
-          cp "$RUNNER_TEMP/old/htail" "$RUNNER_TEMP/ht"
+          mkdir -p "$RUNNER_TEMP/v0161" "$RUNNER_TEMP/v0162" "$RUNNER_TEMP/hostile"
+
+          # Prepare a real stale 0.16.1 application payload.
+          gh release download v0.16.1 --repo mattiafelice-palermo/htail --pattern htail --dir "$RUNNER_TEMP/v0161" --clobber
+          chmod +x "$RUNNER_TEMP/v0161/htail"
+          XDG_CACHE_HOME="$CACHE" python "$RUNNER_TEMP/v0161/htail" --prepare-core
+          STALE_ENV="$(find "$CACHE/htail/0.16.1" -maxdepth 1 -type d -name 'env-*' -print -quit)"
+          test -n "$STALE_ENV"
+          STALE_APP="$STALE_ENV/app"
+
+          # sitecustomize runs before launcher.py and deliberately preloads the
+          # stale 0.16.1 package. This models the worst inherited Python state.
+          cat > "$RUNNER_TEMP/hostile/sitecustomize.py" <<PY
+          import sys
+          sys.path.insert(0, r"$STALE_APP")
+          import htail_app.app
+          PY
+
+          # Start from the actual published 0.16.2 wrapper.
+          gh release download v0.16.2 --repo mattiafelice-palermo/htail --pattern htail --dir "$RUNNER_TEMP/v0162" --clobber
+          cp "$RUNNER_TEMP/v0162/htail" "$RUNNER_TEMP/ht"
           chmod +x "$RUNNER_TEMP/ht"
-
-          test "$(python "$RUNNER_TEMP/ht" --version)" = "htail 0.16.1"
-          XDG_CACHE_HOME="$CACHE" python "$RUNNER_TEMP/ht" --prepare-core
-          OLD_ENV="$(find "$CACHE/htail/0.16.1" -maxdepth 1 -type d -name 'env-*' -print -quit)"
-          test -n "$OLD_ENV"
-          OLD_APP="$OLD_ENV/app"
-
-          # This is the 0.16.1 updater replacing its own executable with the
-          # published latest release, while the old extracted app is present
-          # in inherited PYTHONPATH just as it is during an interactive run.
-          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$OLD_APP" python "$RUNNER_TEMP/ht" --update
           test "$(python "$RUNNER_TEMP/ht" --version)" = "htail 0.16.2"
 
-          # The updated wrapper must prepare and select the new application,
-          # even when the old app path survives in the inherited environment.
-          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$OLD_APP" python "$RUNNER_TEMP/ht" --prepare-core
-          NEW_ENV="$(find "$CACHE/htail/0.16.2" -maxdepth 1 -type d -name 'env-*' -print -quit)"
+          # Even if 0.16.2 starts under a stale preloaded app, its updater must
+          # be able to replace the wrapper with the published latest release.
+          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$RUNNER_TEMP/hostile:$STALE_APP" python "$RUNNER_TEMP/ht" --update
+          test "$(python "$RUNNER_TEMP/ht" --version)" = "htail 0.16.3"
+
+          # 0.16.3 must purge the preloaded 0.16.1 package and prove that the
+          # wrapper and active bundled app are the same version/path.
+          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$RUNNER_TEMP/hostile:$STALE_APP" python "$RUNNER_TEMP/ht" --bundle-self-test | tee "$RUNNER_TEMP/selftest.txt"
+          grep -F 'app 0.16.3' "$RUNNER_TEMP/selftest.txt"
+
+          NEW_ENV="$(find "$CACHE/htail/0.16.3" -maxdepth 1 -type d -name 'env-*' -print -quit)"
           test -n "$NEW_ENV"
           NEW_APP="$NEW_ENV/app"
           grep -F 'members[0][1].score is not None' "$NEW_APP/htail_app/global_search.py"
           if grep -F 'members[0].score is not None' "$NEW_APP/htail_app/global_search.py"; then
-            echo 'published 0.16.2 extracted the stale renderer' >&2
+            echo 'published 0.16.3 extracted the stale grouped renderer' >&2
             exit 1
           fi
 
-          # Launch the updated wrapper with the old app still inherited. Its
-          # own path ordering must select 0.16.2, not the stale 0.16.1 cache.
-          XDG_CACHE_HOME="$CACHE" PYTHONPATH="$OLD_APP" python "$RUNNER_TEMP/ht" --bundle-self-test
-
-          PYTHONPATH="$NEW_APP:$OLD_APP" python - <<'PY'
+          # Render the exact grouped Simple-search shape from the reported bug.
+          PYTHONPATH="$NEW_APP" python - <<'PY'
           from htail_app import VERSION
           from htail_app.global_search import SORT_FILE, render_global_search
           from htail_app.searching import GlobalSearchMatch, SEARCH_SIMPLE
 
-          assert VERSION == "0.16.2", VERSION
-          result = GlobalSearchMatch(0, 0, "coord.md", "2026 workflow", 0, 4, None)
+          assert VERSION == "0.16.3", VERSION
+          result = GlobalSearchMatch(0, 0, "045-agent-coordination.md", "2026 workflow", 0, 4, None)
           rows = render_global_search(
-              120,
-              28,
+              140,
+              32,
               query="2026",
               mode=SEARCH_SIMPLE,
               mode_labels=((SEARCH_SIMPLE, "Simple"),),
@@ -84,6 +95,6 @@ jobs:
           )
           screen = "\n".join(rows)
           assert "AttributeError" not in screen, screen
-          assert "coord.md" in screen, screen
-          print("published update path rendered grouped Simple search successfully")
+          assert "045-agent-coordination.md" in screen, screen
+          print("published 0.16.2 -> 0.16.3 hostile update/render path passed")
           PY
