@@ -52,7 +52,6 @@ class WrapTests(unittest.TestCase):
             self.assertIn(htail.RESET, row[: max(prefix_end + len(htail.RESET), 1)])
 
 
-
 class DiffTests(unittest.TestCase):
     def test_initial_line_limit_never_caps_follow_updates(self):
         old = [f"old {i}\n" for i in range(10)]
@@ -87,7 +86,17 @@ class UpdateTests(unittest.TestCase):
 
     def test_atomic_update_validates_checksum_and_keeps_backup(self):
         service = htail.UpdateService("example/repo", asset_name="htail")
-        new_source = b'#!/usr/bin/env python3\nHTAIL_VERSION = "9.9.9"\nprint("new")\n'
+        new_source = (
+            "#!/usr/bin/env python3\n"
+            'HTAIL_VERSION = "9.9.9"\n'
+            "import sys\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('htail 9.9.9')\n"
+            "elif sys.argv[1:] == ['--bundle-self-test']:\n"
+            "    print('htail bundle self-test: app 9.9.9')\n"
+            "else:\n"
+            "    print('new')\n"
+        ).encode()
         digest = hashlib.sha256(new_source).hexdigest().encode()
         release = htail.ReleaseInfo(version="9.9.9", tag="v9.9.9", asset_url="https://example.invalid/htail", asset_name="htail", checksum_url="https://example.invalid/htail.sha256")
         def fake_urlopen(request, timeout=None):
