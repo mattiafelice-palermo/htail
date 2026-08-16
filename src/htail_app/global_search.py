@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 import re
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -59,18 +58,13 @@ def build_corpus(panes: Sequence[object]) -> List[CorpusLine]:
 
 
 def _fuzzy_span(query: str, text: str, ignore_case: bool) -> Tuple[int, int]:
-    if not query or not text:
+    if not query or not text or _rf_fuzz is None:
         return 0, 0
-    q = query.casefold() if ignore_case else query
-    t = text.casefold() if ignore_case else text
-    exact = t.find(q)
-    if exact >= 0:
-        return exact, exact + len(query)
-    blocks = SequenceMatcher(None, q, t, autojunk=False).get_matching_blocks()
-    best = max(blocks, key=lambda block: block.size, default=None)
-    if best is None or best.size <= 0:
+    processor = str.casefold if ignore_case else None
+    alignment = _rf_fuzz.partial_ratio_alignment(query, text, processor=processor)
+    if alignment is None:
         return 0, min(1, len(text))
-    return best.b, min(len(text), best.b + best.size)
+    return alignment.dest_start, min(len(text), alignment.dest_end)
 
 
 def _sort_fuzzy_by_file(results: Sequence[GlobalSearchMatch]) -> List[GlobalSearchMatch]:
@@ -114,7 +108,7 @@ def search_corpus(
         extracted = _rf_process.extract(
             expression,
             choices,
-            scorer=_rf_fuzz.WRatio,
+            scorer=_rf_fuzz.partial_ratio,
             processor=processor,
             limit=max(1, limit + 1),
             score_cutoff=FUZZY_SCORE_CUTOFF,
