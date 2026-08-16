@@ -8,6 +8,7 @@ import time
 from typing import Dict, List, Optional, Pattern, Sequence, Tuple
 
 from . import core
+from .searching import SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label
 
 
 @dataclass
@@ -108,6 +109,7 @@ class Pane:
         self._snapshot_anchor_pending = False
 
         self.search_pattern = ""
+        self.search_mode = SEARCH_SIMPLE
         self.search_regex: Optional[Pattern[str]] = None
         self._search_last_target: Optional[int] = None
         self.highlight_pattern = ""
@@ -166,24 +168,28 @@ class Pane:
         row = _inject_regex_style(row, self.search_regex, "\x1b[7m", "\x1b[27m")
         return row
 
-    def set_search(self, expression: str, flags: int = 0) -> Optional[str]:
+    def set_search(self, expression: str, flags: int = 0, mode: str = SEARCH_REGEX) -> Optional[str]:
         if not expression:
             self.search_pattern = ""
+            self.search_mode = mode
             self.search_regex = None
             self._search_last_target = None
             self._mark_layout_dirty()
             self._snapshot_layout_dirty = True
             return None
-        try:
-            compiled = re.compile(expression, flags)
-        except re.error as exc:
-            return str(exc)
+        compiled, error = compile_search(expression, mode, flags)
+        if error is not None:
+            return error
         self.search_pattern = expression
+        self.search_mode = mode
         self.search_regex = compiled
         self._search_last_target = None
         self._mark_layout_dirty()
         self._snapshot_layout_dirty = True
         return None
+
+    def _search_display(self) -> str:
+        return search_label(self.search_pattern, self.search_mode)
 
     def set_highlight(self, expression: str, flags: int = 0) -> Optional[str]:
         if not expression:
@@ -206,6 +212,22 @@ class Pane:
         self._snapshot_layout_dirty = True
         self.set_message("regex highlight cleared")
 
+    def jump_to_source_line(self, source_index: int, width: int, body_height: int) -> bool:
+        """Show a current-snapshot source line, centered when geometry allows."""
+        if not self.snapshot_raw:
+            return False
+        self.prefer_snapshot = True
+        self._snapshot_anchor_pending = False
+        self._ensure_snapshot_layout(max(1, width))
+        visual = self._snapshot_source_to_visual.get(source_index)
+        if visual is None:
+            return False
+        body_height = max(1, body_height)
+        desired = max(0, visual - body_height // 2)
+        self._snapshot_top = min(desired, self._snapshot_max_top(body_height))
+        self._search_last_target = source_index
+        return True
+
     def search_next(self, reverse: bool, width: int, body_height: int) -> bool:
         pattern = self.search_regex
         if pattern is None:
@@ -224,7 +246,7 @@ class Pane:
                 and i in self._snapshot_source_to_visual
             ]
             if not candidates:
-                self.set_message(f"no match: /{self.search_pattern}/")
+                self.set_message(f"no match: {self._search_display()}")
                 return False
             current_source = self._search_last_target if self._search_last_target is not None else -1
             if self._search_last_target is None and self._snapshot_visual_to_source:
@@ -245,7 +267,7 @@ class Pane:
             )
             self._search_last_target = target
             position = candidates.index(target) + 1
-            self.set_message(f"match {position}/{len(candidates)}: /{self.search_pattern}/")
+            self.set_message(f"match {position}/{len(candidates)}: {self._search_display()}")
             return True
 
         self._ensure_layout(width)
@@ -254,7 +276,7 @@ class Pane:
             if pattern.search(core.strip_ansi(line)) is not None
         ]
         if not candidates:
-            self.set_message(f"no match: /{self.search_pattern}/")
+            self.set_message(f"no match: {self._search_display()}")
             return False
         current = self._search_last_target if self._search_last_target is not None else self._logical_at_top()
         if reverse:
@@ -266,7 +288,7 @@ class Pane:
         self.top = min(self._logical_to_visual[target], self._max_top(body_height))
         self._search_last_target = target
         position = candidates.index(target) + 1
-        self.set_message(f"match {position}/{len(candidates)}: /{self.search_pattern}/")
+        self.set_message(f"match {position}/{len(candidates)}: {self._search_display()}")
         return True
 
     def set_message(self, text: str, duration: float = 2.5) -> None:

@@ -21,6 +21,7 @@ from .fsnotify import FsEvents, NativeWatchHub
 from .globwatch import DynamicGlob, has_magic
 from .layout import LAYOUTS, Rect, pane_rects, resolve_auto
 from .pane import Pane, StreamPane
+from .searching import GlobalSearchMatch, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, preview_around_match, search_label
 from .sources import CommandFollower, StreamFollower
 from .watcher import FileFollower, WatchNotice, WatchUpdate
 
@@ -32,6 +33,7 @@ core.HTAIL_VERSION = VERSION
 INTERACTIVE_FRAME_INTERVAL = 1.0 / 60.0
 MIN_UPDATE_MODAL_SECONDS = 0.60
 MIN_UPDATE_COMPLETE_SECONDS = 0.35
+GLOBAL_SEARCH_LIMIT = 250
 
 
 def executable_path() -> Path:
@@ -394,6 +396,14 @@ class MultiApp:
         self.dirty = True
         self.prompt_mode: Optional[str] = None
         self.prompt_buffer = ""
+        self.prompt_search_mode = SEARCH_SIMPLE
+        self.global_search_active = False
+        self.global_search_buffer = ""
+        self.global_search_mode = SEARCH_SIMPLE
+        self.global_search_results: List[GlobalSearchMatch] = []
+        self.global_search_selected = 0
+        self.global_search_error: Optional[str] = None
+        self.global_search_truncated = False
         self._last_frame: Optional[List[str]] = None
         self._last_frame_geometry: Optional[Tuple[int, int]] = None
         self.render_rows_written = 0
@@ -564,18 +574,156 @@ class MultiApp:
             out.append(line)
         return out
 
+    def _search_flags(self) -> int:
+        return re.IGNORECASE if self.args.ignore_case else 0
+
+    @staticmethod
+    def _other_search_mode(mode: str) -> str:
+        return SEARCH_REGEX if mode == SEARCH_SIMPLE else SEARCH_SIMPLE
+
+    @staticmethod
+    def _search_mode_name(mode: str) -> str:
+        return "Simple" if mode == SEARCH_SIMPLE else "Regex"
+
     def _prompt_lines(self, width: int, height: int) -> List[str]:
         mode = self.prompt_mode or "search"
-        title = "Regex search" if mode == "search" else "Regex highlight"
-        prefix = "/" if mode == "search" else "highlight: "
+        if mode == "search":
+            mode_name = self._search_mode_name(self.prompt_search_mode)
+            title = f"Search · {mode_name}"
+            content = [
+                core.paint("/ " + self.prompt_buffer, core.BOLD_LIGHT_CYAN, self.color),
+                "",
+                f"Mode: {mode_name} · Tab toggles Simple / Regex",
+            ]
+            if self.prompt_search_mode == SEARCH_SIMPLE:
+                content.append("Simple: ordinary text is literal · * any text · ? one character")
+            else:
+                content.append("Regex: Python regular-expression syntax")
+            content.extend(["", "Enter apply · Esc cancel · Backspace edit"])
+            return _panel_lines(title, content, width, height, self.color)
+
         content = [
-            core.paint(prefix + self.prompt_buffer, core.BOLD_LIGHT_CYAN, self.color),
+            core.paint("highlight: " + self.prompt_buffer, core.BOLD_LIGHT_CYAN, self.color),
             "",
-            "Enter apply · Esc cancel · Backspace edit",
+            "Regex highlight · Enter apply · Esc cancel · Backspace edit",
+            "Use H from the viewer to clear the active highlight.",
         ]
-        if mode == "highlight":
-            content.append("Use H from the viewer to clear the active highlight.")
-        return _panel_lines(title, content, width, height, self.color)
+        return _panel_lines("Regex highlight", content, width, height, self.color)
+
+    def _refresh_global_search_results(self) -> None:
+        pattern, error = compile_search(self.global_search_buffer, self.global_search_mode, self._search_flags())
+        self.global_search_error = error
+        self.global_search_truncated = False
+        if pattern is None:
+            self.global_search_results = []
+            self.global_search_selected = 0
+            return
+
+        results: List[GlobalSearchMatch] = []
+        for pane_index, pane in enumerate(self.panes):
+            for source_index, raw in enumerate(pane.snapshot_raw):
+                if not pane.display_filter.accepts(raw):
+                    continue
+                plain = raw.rstrip("\r\n")
+                match = pattern.search(plain)
+                if match is None:
+                    continue
+                results.append(GlobalSearchMatch(
+                    pane_index,
+                    source_index,
+                    pane.name,
+                    plain,
+                    match.start(),
+                    match.end(),
+                ))
+                if len(results) >= GLOBAL_SEARCH_LIMIT:
+                    self.global_search_truncated = True
+                    break
+            if self.global_search_truncated:
+                break
+        self.global_search_results = results
+        if results:
+            self.global_search_selected = min(max(0, self.global_search_selected), len(results) - 1)
+        else:
+            self.global_search_selected = 0
+
+    def _global_search_lines(self, width: int, height: int) -> List[str]:
+        self._refresh_global_search_results()
+        mode_name = self._search_mode_name(self.global_search_mode)
+        count = len(self.global_search_results)
+        count_label = f"{count}+ matches" if self.global_search_truncated else f"{count} match{'es' if count != 1 else ''}"
+        content: List[str] = [
+            core.paint("> " + self.global_search_buffer, core.BOLD_LIGHT_CYAN, self.color),
+            f"Mode: {mode_name} · Tab toggles Simple / Regex · {count_label}",
+        ]
+        if self.global_search_mode == SEARCH_SIMPLE:
+            content.append("Simple: literal text · * any text · ? one character")
+        else:
+            content.append("Regex: Python regular-expression syntax")
+        content.append("")
+
+        if self.global_search_error:
+            content.append(core.paint(f"Invalid regex: {self.global_search_error}", core.BOLD_YELLOW, self.color))
+        elif not self.global_search_buffer:
+            content.append(core.paint("Type to search every currently watched file.", core.DIM, self.color))
+        elif not self.global_search_results:
+            content.append(core.paint("No matches.", core.DIM, self.color))
+        else:
+            visible_slots = max(3, min(12, height - 10))
+            selected = self.global_search_selected
+            start = max(0, selected - visible_slots // 2)
+            start = min(start, max(0, len(self.global_search_results) - visible_slots))
+            end = min(len(self.global_search_results), start + visible_slots)
+            preview_limit = max(18, min(80, width - 34))
+            for index in range(start, end):
+                result = self.global_search_results[index]
+                preview, pstart, pend = preview_around_match(
+                    result.text, result.match_start, result.match_end, preview_limit
+                )
+                if self.color and pend > pstart:
+                    preview = preview[:pstart] + "\x1b[7m" + preview[pstart:pend] + "\x1b[27m" + preview[pend:]
+                prefix = "▶" if index == selected else " "
+                label = f"[{result.pane_index + 1}] {result.pane_name}:{result.source_index + 1}"
+                row = f"{prefix} {label}  {preview}"
+                if index == selected:
+                    row = core.paint(row, core.BOLD_LIGHT_CYAN, self.color)
+                content.append(row)
+            if self.global_search_truncated:
+                content.append(core.paint(f"Showing first {GLOBAL_SEARCH_LIMIT} matches.", core.DIM, self.color))
+
+        content.extend(["", "↑/↓ select · Enter jump · Tab mode · Esc close"])
+        return _panel_lines("Global search", content, width, height, self.color)
+
+    def _select_global_search_result(self) -> bool:
+        self._refresh_global_search_results()
+        if not self.global_search_results:
+            return False
+        result = self.global_search_results[self.global_search_selected]
+        if result.pane_index >= len(self.panes):
+            return False
+        if self.layout == "stream":
+            self.layout = "auto"
+            self.maximized = False
+        self.focus = result.pane_index
+        pane = self.panes[result.pane_index]
+        error = pane.set_search(
+            self.global_search_buffer,
+            self._search_flags(),
+            mode=self.global_search_mode,
+        )
+        if error is not None:
+            self.global_search_error = error
+            return False
+        inner_w, body_h = self._active_pane_geometry()
+        pane.jump_to_source_line(result.source_index, inner_w, body_h)
+        pane.set_message(
+            f"global match {result.source_index + 1}: {search_label(self.global_search_buffer, self.global_search_mode)}",
+            4.0,
+        )
+        self.global_search_active = False
+        self.global_search_error = None
+        self.dirty = True
+        return True
 
     def _active_pane_geometry(self) -> Tuple[int, int]:
         target = -1 if self.layout == "stream" else self.focus
@@ -600,7 +748,8 @@ class MultiApp:
             "  z                  maximize focused pane / restore layout",
             "",
             "Focused pane",
-            "  /                  regex search; n / N next / previous match",
+            "  /                  search focused pane; Tab toggles Simple / Regex",
+            "  n / N              next / previous local match",
             "  h                  set regex highlight; H clears it",
             "  ↑ ↓ / PgUp PgDn    scroll",
             "  [ / ]              previous / next update",
@@ -609,6 +758,7 @@ class MultiApp:
             "  c                  clear displayed history; tracking continues",
             "",
             "Global",
+            "  g                  live search across all watched files",
             "  u                  check/install updates",
             "  ?                  close help",
             "  q                  quit",
@@ -746,13 +896,15 @@ class MultiApp:
         elif self.update_release is not None:
             parts.append(f"UPDATE {self.update_release.version}")
         top = " · ".join(parts)
-        controls = "/ search · n/N match · h highlight · Tab pane · l layout · ↑↓/Pg scroll · [/] update · f newest · p pause · u update · q quit · ? help"
+        controls = "/ search · g global · n/N match · h highlight · Tab pane · l layout · ↑↓/Pg scroll · [/] update · f newest · p pause · u update · q quit · ? help"
         return [top, controls]
 
     def _frame_rows(self) -> Tuple[int, List[str]]:
         width, body_height, footer_height = self.content_dimensions()
         base_body = self._pane_boxes(width, body_height)
-        if self.prompt_mode:
+        if self.global_search_active:
+            body = _overlay_modal(base_body, self._global_search_lines(width, body_height), width, body_height, self.color)
+        elif self.prompt_mode:
             body = _overlay_modal(base_body, self._prompt_lines(width, body_height), width, body_height, self.color)
         elif self.update_confirm_active:
             body = _overlay_modal(base_body, self._update_lines(width, body_height), width, body_height, self.color)
@@ -763,8 +915,13 @@ class MultiApp:
         else:
             body = base_body
 
-        if self.prompt_mode:
-            status = ["REGEX · Enter apply · Esc cancel", "Background watching continues while this dialog is open"]
+        if self.global_search_active:
+            status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ select · Enter jump · Tab mode · Esc close", "Background watching continues while this dialog is open"]
+        elif self.prompt_mode:
+            if self.prompt_mode == "search":
+                status = [f"SEARCH · {self._search_mode_name(self.prompt_search_mode)} · Tab mode · Enter apply · Esc cancel", "Background watching continues while this dialog is open"]
+            else:
+                status = ["REGEX HIGHLIGHT · Enter apply · Esc cancel", "Background watching continues while this dialog is open"]
         elif self.update_confirm_active:
             status = ["UPDATE · y confirm · n cancel", "Background watching continues while this dialog is open"]
         elif self.layout_menu:
@@ -856,6 +1013,46 @@ class MultiApp:
             self.dirty = True
 
     def handle_input(self, event: InputEvent) -> bool:
+        if self.global_search_active and not isinstance(event, MouseEvent):
+            key = event
+            if key == "ESC":
+                self.global_search_active = False
+                self.global_search_error = None
+                self.dirty = True
+                return False
+            if key in ("TAB", "SHIFT_TAB"):
+                self.global_search_mode = self._other_search_mode(self.global_search_mode)
+                self.global_search_selected = 0
+                self._refresh_global_search_results()
+                self.dirty = True
+                return False
+            if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN"):
+                self._refresh_global_search_results()
+                if self.global_search_results:
+                    delta = {"UP": -1, "DOWN": 1, "PAGEUP": -8, "PAGEDOWN": 8}[key]
+                    self.global_search_selected = min(
+                        max(0, self.global_search_selected + delta),
+                        len(self.global_search_results) - 1,
+                    )
+                self.dirty = True
+                return False
+            if key in ("\r", "\n"):
+                self._select_global_search_result()
+                self.dirty = True
+                return False
+            if key in ("\x7f", "\b"):
+                self.global_search_buffer = self.global_search_buffer[:-1]
+                self.global_search_selected = 0
+                self._refresh_global_search_results()
+                self.dirty = True
+                return False
+            if isinstance(key, str) and len(key) == 1 and key.isprintable():
+                self.global_search_buffer += key
+                self.global_search_selected = 0
+                self._refresh_global_search_results()
+                self.dirty = True
+            return False
+
         if self.prompt_mode and not isinstance(event, MouseEvent):
             key = event
             if key == "ESC":
@@ -863,11 +1060,15 @@ class MultiApp:
                 self.prompt_buffer = ""
                 self.dirty = True
                 return False
+            if key in ("TAB", "SHIFT_TAB") and self.prompt_mode == "search":
+                self.prompt_search_mode = self._other_search_mode(self.prompt_search_mode)
+                self.dirty = True
+                return False
             if key in ("\r", "\n"):
                 pane = self.active_pane()
-                flags = re.IGNORECASE if self.args.ignore_case else 0
+                flags = self._search_flags()
                 if self.prompt_mode == "search":
-                    error = pane.set_search(self.prompt_buffer, flags)
+                    error = pane.set_search(self.prompt_buffer, flags, mode=self.prompt_search_mode)
                     if error is None:
                         inner_w, body_h = self._active_pane_geometry()
                         pane.search_next(False, inner_w, body_h)
@@ -876,7 +1077,7 @@ class MultiApp:
                     if error is None:
                         pane.set_message(f"highlight /{self.prompt_buffer}/" if self.prompt_buffer else "regex highlight cleared")
                 if error is not None:
-                    self.set_message(f"invalid regex: {error}", 5.0)
+                    self.set_message(f"invalid search: {error}", 5.0)
                 self.prompt_mode = None
                 self.prompt_buffer = ""
                 self.dirty = True
@@ -891,7 +1092,7 @@ class MultiApp:
             return False
 
         if isinstance(event, MouseEvent):
-            if not (self.help_active or self.layout_menu or self.update_confirm_active):
+            if not (self.help_active or self.layout_menu or self.update_confirm_active or self.global_search_active or self.prompt_mode):
                 self.handle_mouse(event)
             return False
 
@@ -966,8 +1167,16 @@ class MultiApp:
             return False
 
         if key == "/":
+            pane = self.active_pane()
             self.prompt_mode = "search"
-            self.prompt_buffer = self.active_pane().search_pattern
+            self.prompt_buffer = pane.search_pattern
+            self.prompt_search_mode = pane.search_mode if pane.search_pattern else SEARCH_SIMPLE
+            self.dirty = True
+            return False
+        if key in ("g", "G"):
+            self.global_search_active = True
+            self.global_search_selected = 0
+            self._refresh_global_search_results()
             self.dirty = True
             return False
         if key == "h":
