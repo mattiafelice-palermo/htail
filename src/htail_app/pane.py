@@ -11,6 +11,10 @@ from . import core
 from .searching import SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label
 
 
+FOLLOW_CHANGES = "changes"
+FOLLOW_TAIL = "tail"
+
+
 @dataclass
 class PaneUpdate:
     number: int
@@ -92,6 +96,13 @@ class Pane:
         self._visual_to_logical: List[int] = []
         self._pending_anchor_logical: Optional[int] = None
         self._initial_bottom_pending = False
+        # Startup follows EOF until the user actually navigates or the first
+        # update arrives. Unlike the legacy one-shot flag, this survives a
+        # terminal/layout geometry change between the first two renders.
+        self._startup_follow_eof = True
+        self.follow_mode = FOLLOW_CHANGES
+        self.tail_auto_follow = True
+        self._snapshot_tail_pending = False
 
         # Independently retain the current verified file snapshot. History is
         # still kept in self.lines; this snapshot is used only when the whole
@@ -112,6 +123,8 @@ class Pane:
         self.search_mode = SEARCH_SIMPLE
         self.search_regex: Optional[Pattern[str]] = None
         self._search_last_target: Optional[int] = None
+        self._search_match_position: Optional[int] = None
+        self._search_match_total = 0
         self.highlight_pattern = ""
         self.highlight_regex: Optional[Pattern[str]] = None
 
@@ -158,14 +171,19 @@ class Pane:
                 return rendered
         return self.highlighter.render_lines(raw_visible)
 
-    def _apply_regex_marks(self, row: str) -> str:
+    def _apply_regex_marks(self, row: str, search_index: Optional[int] = None) -> str:
         if not self.color:
             return row
-        # Underline is the persistent user highlight; reverse video is the
-        # current search expression. Attribute-specific off codes preserve the
-        # foreground/bold syntax styles already present in the row.
+        # Underline is the persistent user highlight. Non-selected search
+        # matches keep reverse video; the currently selected n/N match gets a
+        # bright-yellow background so it is immediately distinguishable while
+        # preserving the row's existing foreground/syntax colour.
         row = _inject_regex_style(row, self.highlight_regex, "\x1b[4m", "\x1b[24m")
-        row = _inject_regex_style(row, self.search_regex, "\x1b[7m", "\x1b[27m")
+        if self.search_regex is not None:
+            if search_index is not None and search_index == self._search_last_target:
+                row = _inject_regex_style(row, self.search_regex, "\x1b[103m", "\x1b[49m")
+            else:
+                row = _inject_regex_style(row, self.search_regex, "\x1b[7m", "\x1b[27m")
         return row
 
     def set_search(self, expression: str, flags: int = 0, mode: str = SEARCH_REGEX) -> Optional[str]:
@@ -174,6 +192,8 @@ class Pane:
             self.search_mode = mode
             self.search_regex = None
             self._search_last_target = None
+            self._search_match_position = None
+            self._search_match_total = 0
             self._mark_layout_dirty()
             self._snapshot_layout_dirty = True
             return None
@@ -184,12 +204,45 @@ class Pane:
         self.search_mode = mode
         self.search_regex = compiled
         self._search_last_target = None
+        self._refresh_search_position()
         self._mark_layout_dirty()
         self._snapshot_layout_dirty = True
         return None
 
     def _search_display(self) -> str:
         return search_label(self.search_pattern, self.search_mode)
+
+    def _search_candidates(self) -> List[int]:
+        pattern = self.search_regex
+        if pattern is None:
+            return []
+        if self.snapshot_raw:
+            return [
+                i for i, line in enumerate(self.snapshot_raw)
+                if self.display_filter.accepts(line)
+                and pattern.search(line.rstrip("\r\n")) is not None
+            ]
+        return [
+            i for i, line in enumerate(self.lines)
+            if pattern.search(core.strip_ansi(line)) is not None
+        ]
+
+    def _refresh_search_position(self) -> List[int]:
+        candidates = self._search_candidates()
+        self._search_match_total = len(candidates)
+        if self._search_last_target in candidates:
+            self._search_match_position = candidates.index(self._search_last_target) + 1
+        else:
+            self._search_match_position = None
+        return candidates
+
+    def _set_search_target(self, target: int) -> None:
+        self._search_last_target = target
+        self._refresh_search_position()
+        # Search styling is cached in both layouts; selecting another hit must
+        # repaint the old and new selected lines.
+        self._mark_layout_dirty()
+        self._snapshot_layout_dirty = True
 
     def set_highlight(self, expression: str, flags: int = 0) -> Optional[str]:
         if not expression:
@@ -216,8 +269,12 @@ class Pane:
         """Show a current-snapshot source line, centered when geometry allows."""
         if not self.snapshot_raw:
             return False
+        self._startup_follow_eof = False
+        if self.follow_mode == FOLLOW_TAIL:
+            self.tail_auto_follow = False
         self.prefer_snapshot = True
         self._snapshot_anchor_pending = False
+        self._snapshot_tail_pending = False
         self._ensure_snapshot_layout(max(1, width))
         visual = self._snapshot_source_to_visual.get(source_index)
         if visual is None:
@@ -225,7 +282,7 @@ class Pane:
         body_height = max(1, body_height)
         desired = max(0, visual - body_height // 2)
         self._snapshot_top = min(desired, self._snapshot_max_top(body_height))
-        self._search_last_target = source_index
+        self._set_search_target(source_index)
         return True
 
     def search_next(self, reverse: bool, width: int, body_height: int) -> bool:
@@ -234,20 +291,25 @@ class Pane:
             self.set_message("no active search")
             return False
 
+        self._startup_follow_eof = False
+        if self.follow_mode == FOLLOW_TAIL:
+            self.tail_auto_follow = False
         width = max(1, width)
         body_height = max(1, body_height)
+        candidates = self._refresh_search_position()
+        if not candidates:
+            self._search_last_target = None
+            self._search_match_position = None
+            self._mark_layout_dirty()
+            self._snapshot_layout_dirty = True
+            self.set_message(f"no match: {self._search_display()}")
+            return False
+
         if self.snapshot_raw:
             self.prefer_snapshot = True
+            self._snapshot_anchor_pending = False
+            self._snapshot_tail_pending = False
             self._ensure_snapshot_layout(width)
-            candidates = [
-                i for i, line in enumerate(self.snapshot_raw)
-                if self.display_filter.accepts(line)
-                and pattern.search(line.rstrip("\r\n")) is not None
-                and i in self._snapshot_source_to_visual
-            ]
-            if not candidates:
-                self.set_message(f"no match: {self._search_display()}")
-                return False
             current_source = self._search_last_target if self._search_last_target is not None else -1
             if self._search_last_target is None and self._snapshot_visual_to_source:
                 start = min(max(0, self._snapshot_top), len(self._snapshot_visual_to_source) - 1)
@@ -256,39 +318,30 @@ class Pane:
                         current_source = source
                         break
             if reverse:
-                prior = [i for i in candidates if i < current_source]
+                prior = [i for i in candidates if i < current_source or (self._search_last_target is None and i == current_source)]
                 target = prior[-1] if prior else candidates[-1]
             else:
-                later = [i for i in candidates if i > current_source]
+                later = [i for i in candidates if i > current_source or (self._search_last_target is None and i == current_source)]
                 target = later[0] if later else candidates[0]
             self._snapshot_top = min(
                 self._snapshot_source_to_visual[target],
                 self._snapshot_max_top(body_height),
             )
-            self._search_last_target = target
-            position = candidates.index(target) + 1
-            self.set_message(f"match {position}/{len(candidates)}: {self._search_display()}")
+            self._set_search_target(target)
+            self.set_message(f"match {self._search_match_position}/{self._search_match_total}: {self._search_display()}")
             return True
 
         self._ensure_layout(width)
-        candidates = [
-            i for i, line in enumerate(self.lines)
-            if pattern.search(core.strip_ansi(line)) is not None
-        ]
-        if not candidates:
-            self.set_message(f"no match: {self._search_display()}")
-            return False
         current = self._search_last_target if self._search_last_target is not None else self._logical_at_top()
         if reverse:
-            prior = [i for i in candidates if i < current]
+            prior = [i for i in candidates if i < current or (self._search_last_target is None and i == current)]
             target = prior[-1] if prior else candidates[-1]
         else:
-            later = [i for i in candidates if i > current]
+            later = [i for i in candidates if i > current or (self._search_last_target is None and i == current)]
             target = later[0] if later else candidates[0]
         self.top = min(self._logical_to_visual[target], self._max_top(body_height))
-        self._search_last_target = target
-        position = candidates.index(target) + 1
-        self.set_message(f"match {position}/{len(candidates)}: {self._search_display()}")
+        self._set_search_target(target)
+        self.set_message(f"match {self._search_match_position}/{self._search_match_total}: {self._search_display()}")
         return True
 
     def set_message(self, text: str, duration: float = 2.5) -> None:
@@ -319,7 +372,7 @@ class Pane:
 
         for logical_index, line in enumerate(self.lines):
             self._logical_to_visual.append(len(self._visual_lines))
-            wrapped = self._wrap_cached(self._apply_regex_marks(line), width)
+            wrapped = self._wrap_cached(self._apply_regex_marks(line, logical_index), width)
             self._visual_lines.extend(wrapped)
             self._visual_to_logical.extend([logical_index] * len(wrapped))
 
@@ -354,15 +407,23 @@ class Pane:
     ) -> None:
         self.snapshot_raw = list(raw_lines)
         self.snapshot_changed = set(changed_indices)
-        self._search_last_target = None
         self.snapshot_update_header = update_header
         self._snapshot_layout_dirty = True
+        if self.search_regex is not None:
+            self._refresh_search_position()
         if prefer:
-            self.prefer_snapshot = True
-            # A fresh update opens at its marker inside the complete current
-            # file. Scrolling then stays inside this snapshot; [ and ] are the
-            # explicit controls for entering historical update records.
-            self._snapshot_anchor_pending = True
+            self._startup_follow_eof = False
+            if self.follow_mode == FOLLOW_TAIL:
+                if self.tail_auto_follow:
+                    self.prefer_snapshot = True
+                    self._snapshot_tail_pending = True
+                    self._snapshot_anchor_pending = False
+                # If the user manually left EOF in TAIL mode, retain whichever
+                # view they are inspecting instead of yanking them back.
+            else:
+                self.prefer_snapshot = True
+                self._snapshot_anchor_pending = True
+                self._snapshot_tail_pending = False
 
     def _ensure_snapshot_layout(self, width: int) -> None:
         width = max(1, width)
@@ -394,7 +455,7 @@ class Pane:
                 header_inserted = True
             if changed:
                 row = core.paint("▌ ", core.BOLD_LIGHT_CYAN, self.color) + row
-            row = self._apply_regex_marks(row)
+            row = self._apply_regex_marks(row, source_index)
             self._snapshot_source_to_visual[source_index] = len(visual)
             wrapped_rows = self._wrap_cached(row, width)
             visual.extend(wrapped_rows)
@@ -407,7 +468,13 @@ class Pane:
             self._snapshot_visual_to_source.extend([None] * len(header_rows))
 
         self._snapshot_visual_lines = visual
-        if self._snapshot_anchor_pending:
+        if self._snapshot_tail_pending:
+            # Body height is not known here; park at the final row and the
+            # viewport clamp in render_box/_snapshot_view_rows will convert it
+            # to the last full screenful.
+            self._snapshot_top = max(0, len(visual) - 1)
+            self._snapshot_tail_pending = False
+        elif self._snapshot_anchor_pending:
             self._snapshot_top = anchor if anchor is not None else max(0, len(visual) - 1)
             self._snapshot_anchor_pending = False
         else:
@@ -438,6 +505,7 @@ class Pane:
         self.lines.extend(core.render_initial_lines(visible, self.highlighter))
         self._mark_layout_dirty()
         self._initial_bottom_pending = True
+        self._startup_follow_eof = True
         self.waiting = False
         self.missing = False
 
@@ -446,7 +514,10 @@ class Pane:
         return max(0, len(self._visual_lines) - max(0, body_height))
 
     def _apply_initial_bottom(self, body_height: int) -> None:
-        if self._initial_bottom_pending:
+        # Keep following EOF across startup geometry/layout changes until the
+        # user explicitly navigates or a real update establishes follow-mode
+        # semantics. This fixes the old one-shot flag being consumed too early.
+        if self._startup_follow_eof or self._initial_bottom_pending:
             self.top = self._max_top(body_height)
             self._initial_bottom_pending = False
 
@@ -517,6 +588,24 @@ class Pane:
         base = self.last_update_monotonic if self.last_update_monotonic is not None else self.watch_started_monotonic
         return max(0.0, now - base)
 
+    def toggle_follow_mode(self) -> None:
+        self._startup_follow_eof = False
+        if self.follow_mode == FOLLOW_CHANGES:
+            self.follow_mode = FOLLOW_TAIL
+            self.tail_auto_follow = True
+            if self.snapshot_raw:
+                self.prefer_snapshot = True
+                self._snapshot_anchor_pending = False
+                self._snapshot_tail_pending = True
+                self._snapshot_layout_dirty = True
+            else:
+                self._initial_bottom_pending = True
+            self.set_message("follow mode: TAIL")
+        else:
+            self.follow_mode = FOLLOW_CHANGES
+            self._snapshot_tail_pending = False
+            self.set_message("follow mode: CHANGES")
+
     def toggle_pause(self) -> None:
         self.paused = not self.paused
         if self.paused:
@@ -525,18 +614,36 @@ class Pane:
             self.unseen_updates = 0
             if self.updates and self.snapshot_raw:
                 self.prefer_snapshot = True
-                self._snapshot_anchor_pending = True
+                if self.follow_mode == FOLLOW_TAIL:
+                    self.tail_auto_follow = True
+                    self._snapshot_anchor_pending = False
+                    self._snapshot_tail_pending = True
+                    self._snapshot_layout_dirty = True
+                else:
+                    self._snapshot_tail_pending = False
+                    self._snapshot_anchor_pending = True
             self.set_message("resumed at freshest update")
 
     def freshest(self) -> None:
-        if self.updates and self.snapshot_raw:
+        self._startup_follow_eof = False
+        if self.snapshot_raw:
             self.unseen_updates = 0
             self.prefer_snapshot = True
-            self._snapshot_anchor_pending = True
+            if self.follow_mode == FOLLOW_TAIL:
+                self.tail_auto_follow = True
+                self._snapshot_anchor_pending = False
+                self._snapshot_tail_pending = True
+                self._snapshot_layout_dirty = True
+            elif self.updates:
+                self._snapshot_tail_pending = False
+                self._snapshot_anchor_pending = True
 
     def previous_update(self) -> None:
         if not self.updates:
             return
+        self._startup_follow_eof = False
+        if self.follow_mode == FOLLOW_TAIL:
+            self.tail_auto_follow = False
         self.prefer_snapshot = False
         current = self._logical_at_top()
         candidates = [u for u in self.updates if u.start < current]
@@ -546,6 +653,9 @@ class Pane:
     def next_update(self) -> None:
         if not self.updates:
             return
+        self._startup_follow_eof = False
+        if self.follow_mode == FOLLOW_TAIL:
+            self.tail_auto_follow = False
         self.prefer_snapshot = False
         current = self._logical_at_top()
         candidates = [u for u in self.updates if u.start > current]
@@ -564,6 +674,21 @@ class Pane:
 
     def scroll(self, command: str, body_height: int) -> None:
         page = max(1, body_height - 2)
+        self._startup_follow_eof = False
+
+        # END is an explicit "return to live tail" action in TAIL mode even if
+        # the user is currently looking at historical update records.
+        if self.follow_mode == FOLLOW_TAIL and command == "END" and self.snapshot_raw:
+            self.tail_auto_follow = True
+            self.prefer_snapshot = True
+            self._snapshot_anchor_pending = False
+            self._snapshot_tail_pending = True
+            self._snapshot_layout_dirty = True
+            return
+
+        if self.follow_mode == FOLLOW_TAIL and command in ("UP", "PAGEUP", "HOME"):
+            self.tail_auto_follow = False
+
         if self.prefer_snapshot and self.snapshot_raw:
             if not self._snapshot_visual_lines:
                 return
@@ -580,6 +705,9 @@ class Pane:
             elif command == "END":
                 self._snapshot_top = self._snapshot_max_top(body_height)
             self._snapshot_top = min(max(0, self._snapshot_top), self._snapshot_max_top(body_height))
+            if self.follow_mode == FOLLOW_TAIL and command in ("DOWN", "PAGEDOWN"):
+                if self._snapshot_top >= self._snapshot_max_top(body_height):
+                    self.tail_auto_follow = True
             return
 
         if not self._visual_lines:
@@ -629,7 +757,10 @@ class Pane:
             state = "WAITING"
         else:
             state = "PAUSED" if self.paused else "LIVE"
-        parts = [f"{index + 1}:{self.name}", state]
+        parts = [f"{index + 1}:{self.name}", state, self.follow_mode.upper()]
+        if self.search_regex is not None:
+            position = self._search_match_position or 0
+            parts.append(f"MATCH {position}/{self._search_match_total}")
         current = self.current_update_number()
         if current is not None:
             parts.append(f"U{current}")

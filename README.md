@@ -86,12 +86,13 @@ Press `l` while htail is running to switch layout without restarting. Pane scrol
 | `[` / `]` | Previous / next captured update in focused pane |
 | `f` | Jump focused pane to its freshest update |
 | `p` | Pause/resume automatic jumps in focused pane |
+| `t` | Toggle focused pane between **CHANGES** and **TAIL** follow modes |
 | `c` | Clear focused pane history without resetting file tracking |
 | `u` | Check GitHub now; if an update exists, open its modal automatically |
 | `?` | Toggle help |
 | `q` | Quit |
 
-Search and highlight prompts use regular expressions. `-I` / `--ignore-case` also applies to interactive regexes. Search matches are shown with reverse video; persistent highlights use underline so existing syntax colors remain visible.
+Simple search is the default; `Tab` switches its prompt to explicit regex mode. `-I` / `--ignore-case` applies to both. Search matches use reverse video, while the currently selected `n` / `N` match gets a bright-yellow background and the pane title shows `MATCH x/y`. Persistent regex highlights use underline so existing syntax colors remain visible.
 
 Mouse tracking can be disabled with `--no-mouse`. Keyboard controls always remain available.
 
@@ -109,7 +110,7 @@ run-??-error    exactly two characters between the dashes
 
 Press `g` for **global live search** across every currently watched file. Results update as you type. Use `↑` / `↓` to choose a result and `Enter` to focus its pane and jump to the matching source line; the query becomes that pane's active local search. `Tab` toggles Simple / Regex here as well.
 
-A new update moves **only its own pane** to the beginning of that update. Other panes keep their current reading position. While a pane is paused, changes are still captured and its title reports unseen updates. The focused pane is visually distinguished from the others.
+Every pane starts at **EOF** on first open. In the default **CHANGES** follow mode, a new update moves only its own pane to the first changed/new line. Press `t` to switch that pane to **TAIL** mode, where updates keep the viewport at EOF like `tail -f`. Manually scrolling upward in TAIL mode suspends auto-follow so the viewport is not yanked away; `f`, `End`, or scrolling back to EOF resumes it. Other panes keep their current reading position. While a pane is paused, changes are still captured and its title reports unseen updates.
 
 ## Display and performance features
 

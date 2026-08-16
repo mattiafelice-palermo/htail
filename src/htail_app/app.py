@@ -755,6 +755,7 @@ class MultiApp:
             "  [ / ]              previous / next update",
             "  f                  freshest update",
             "  p                  pause/resume automatic jumps",
+            "  t                  toggle CHANGES / TAIL follow mode",
             "  c                  clear displayed history; tracking continues",
             "",
             "Global",
@@ -896,7 +897,7 @@ class MultiApp:
         elif self.update_release is not None:
             parts.append(f"UPDATE {self.update_release.version}")
         top = " · ".join(parts)
-        controls = "/ search · g global · n/N match · h highlight · Tab pane · l layout · ↑↓/Pg scroll · [/] update · f newest · p pause · u update · q quit · ? help"
+        controls = "/ search · g global · n/N match · h highlight · Tab pane · l layout · ↑↓/Pg scroll · [/] update · f newest · t follow · p pause · u update · q quit · ? help"
         return [top, controls]
 
     def _frame_rows(self) -> Tuple[int, List[str]]:
@@ -1213,6 +1214,8 @@ class MultiApp:
         pane = self.active_pane()
         if key in ("p", "P"):
             pane.toggle_pause(); self.dirty = True; return False
+        if key in ("t", "T"):
+            pane.toggle_follow_mode(); self.dirty = True; return False
         if key in ("c", "C"):
             pane.clear_display(); self.dirty = True; return False
         if key in ("f", "F"):
