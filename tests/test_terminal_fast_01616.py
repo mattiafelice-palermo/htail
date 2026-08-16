@@ -113,6 +113,23 @@ class TerminalFastPathTests(unittest.TestCase):
             finally:
                 application.close_native_watch()
 
+    def test_fast_scroll_keeps_frame_baseline_for_next_global_redraw(self):
+        with tempfile.TemporaryDirectory() as td:
+            application = self._application(Path(td), 1, "rows")
+            output = io.StringIO()
+            try:
+                self._prime(application, output)
+                with mock.patch("sys.stdout", output):
+                    application.handle_input("UP")
+                    application.render()
+                    self.assertIsNotNone(application._last_frame)
+                    output.seek(0); output.truncate(0)
+                    application.set_message("global status changed")
+                    application.render()
+                self.assertNotIn(core.CLEAR_SCREEN, output.getvalue())
+            finally:
+                application.close_native_watch()
+
 
 if __name__ == "__main__":
     unittest.main()

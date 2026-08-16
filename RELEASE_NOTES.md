@@ -1,3 +1,15 @@
+# htail 0.16.17
+
+## New features
+
+- Held Up/Down scrolling now coalesces queued terminal key-repeat events and accelerates sustained repeats while preserving exact one-line movement for individual taps.
+- Optional real-use performance tracing is available through `HTAIL_PERF_TRACE`, emitting one-second aggregate JSONL samples plus exceptional slow-render/full-redraw events without installing runtime tracing when the variable is unset.
+
+## Bug fixes
+
+- Arrow-key repeat backlog is drained in one event-loop pass, so scrolling stops promptly after the key is released instead of continuing through stale queued input.
+- Terminal fast-path writes now keep the in-memory frame baseline synchronized, preventing the next unrelated UI redraw from unnecessarily clearing and repainting the whole terminal.
+
 # htail 0.16.16
 
 ## New features

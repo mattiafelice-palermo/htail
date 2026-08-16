@@ -170,8 +170,19 @@ def _install() -> None:
 
         sys.stdout.flush()
         self.render_frames += 1
-        self._last_frame = None
-        self._last_frame_geometry = None
+
+        # Direct terminal writes must also advance the in-memory full-frame
+        # baseline. Otherwise the next unrelated dirty event sees no baseline
+        # and the compatibility renderer clears/redraws the whole terminal.
+        dirty_scope = self._render_dirty_panes
+        self._render_dirty_panes = set()
+        try:
+            frame_width, frame = self._frame_rows()
+        finally:
+            self._render_dirty_panes = dirty_scope
+        self._last_frame = list(frame)
+        self._last_frame_geometry = (frame_width, len(frame))
+        self._terminal_fast_geometry = terminal_geometry(self)
         self._terminal_scroll_hint = None
         self.dirty = False
         return True
