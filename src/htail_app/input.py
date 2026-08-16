@@ -32,6 +32,7 @@ def normalize_plain_key(ch: str) -> str:
         "\x0f": "CTRL_O",
         "\x10": "CTRL_P",
         "\x14": "CTRL_T",
+        "\x17": "CTRL_W",
     }.get(ch, ch)
 
 
@@ -41,6 +42,9 @@ def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
         "\x1b[6~": "PAGEDOWN", "\x1b[H": "HOME", "\x1b[F": "END",
         "\x1bOH": "HOME", "\x1bOF": "END", "\x1b[Z": "SHIFT_TAB",
         "\x1b[1;2A": "SHIFT_UP", "\x1b[1;2B": "SHIFT_DOWN",
+        "\x1b[1;5A": "CTRL_UP", "\x1b[1;5B": "CTRL_DOWN",
+        "\x1b[1;5C": "CTRL_RIGHT", "\x1b[1;5D": "CTRL_LEFT",
+        "\x1b[5;5~": "CTRL_PAGEUP", "\x1b[6;5~": "CTRL_PAGEDOWN",
         "\x1b": "ESC",
     }
     if seq in mapping:
