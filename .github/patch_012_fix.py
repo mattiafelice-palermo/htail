@@ -11,5 +11,19 @@ new = '''    "        self._pending_anchor_logical: Optional[int] = None\\n     
 '''
 if text.count(old) != 1:
     raise RuntimeError(f'constructor patch marker count={text.count(old)}')
-path.write_text(text.replace(old, new, 1), encoding='utf-8')
+text = text.replace(old, new, 1)
+
+old_snapshot = '''            if reverse:\n                prior = [i for i in candidates if i < current_source]\n                target = prior[-1] if prior else candidates[-1]\n            else:\n                later = [i for i in candidates if i > current_source]\n                target = later[0] if later else candidates[0]\n'''
+new_snapshot = '''            if reverse:\n                prior = [i for i in candidates if i < current_source or (self._search_last_target is None and i == current_source)]\n                target = prior[-1] if prior else candidates[-1]\n            else:\n                later = [i for i in candidates if i > current_source or (self._search_last_target is None and i == current_source)]\n                target = later[0] if later else candidates[0]\n'''
+if text.count(old_snapshot) != 1:
+    raise RuntimeError(f'snapshot search marker count={text.count(old_snapshot)}')
+text = text.replace(old_snapshot, new_snapshot, 1)
+
+old_history = '''        if reverse:\n            prior = [i for i in candidates if i < current]\n            target = prior[-1] if prior else candidates[-1]\n        else:\n            later = [i for i in candidates if i > current]\n            target = later[0] if later else candidates[0]\n'''
+new_history = '''        if reverse:\n            prior = [i for i in candidates if i < current or (self._search_last_target is None and i == current)]\n            target = prior[-1] if prior else candidates[-1]\n        else:\n            later = [i for i in candidates if i > current or (self._search_last_target is None and i == current)]\n            target = later[0] if later else candidates[0]\n'''
+if text.count(old_history) != 1:
+    raise RuntimeError(f'history search marker count={text.count(old_history)}')
+text = text.replace(old_history, new_history, 1)
+
+path.write_text(text, encoding='utf-8')
 runpy.run_path(str(path), run_name='__main__')
