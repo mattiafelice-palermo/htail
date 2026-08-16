@@ -23,7 +23,8 @@ from .globwatch import DynamicGlob, has_magic
 from .layout import LAYOUTS, Rect, pane_rects, resolve_auto
 from .pane import Pane, StreamPane
 from .extras import is_compressed_path, markdown_outline, parse_duration, syntax_path_for_source
-from .searching import GlobalSearchMatch, SEARCH_BOOLEAN, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, preview_around_match, search_label
+from .global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, fuzzy_backend, render_global_search, search_corpus
+from .searching import GlobalSearchMatch, SEARCH_BOOLEAN, SEARCH_FUZZY, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label, simple_escape
 from .sources import CommandFollower, CompressedFollower, SSHFollower, StreamFollower
 from .watcher import FileFollower, WatchNotice, WatchUpdate
 
@@ -98,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable terminal mouse tracking (keyboard pane selection still works)",
     )
     parser.add_argument("--no-native-watch", action="store_true", help="disable native filesystem notifications and use polling only")
+    parser.add_argument("--bundle-self-test", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -419,6 +421,13 @@ class MultiApp:
         self.global_search_selected = 0
         self.global_search_error: Optional[str] = None
         self.global_search_truncated = False
+        self.global_search_ignore_case = bool(args.ignore_case)
+        self.global_search_sort = SORT_FILE
+        self.global_search_file_filter: Optional[int] = None
+        self.global_search_preview = True
+        self._global_search_corpus_signature = None
+        self._global_search_corpus = []
+        self._global_search_cache_key = None
         self.palette_active = False
         self.palette_mode = "commands"
         self.palette_buffer = ""
@@ -620,13 +629,27 @@ class MultiApp:
     def _local_search_flags(self) -> int:
         return re.IGNORECASE if self.prompt_ignore_case else 0
 
+    def _global_search_flags(self) -> int:
+        return re.IGNORECASE if self.global_search_ignore_case else 0
+
     @staticmethod
     def _other_search_mode(mode: str) -> str:
+        # Local search deliberately stays Simple / Regex / Boolean. Fuzzy is a
+        # global ranking operation rather than a per-pane regex-like matcher.
         return {SEARCH_SIMPLE: SEARCH_REGEX, SEARCH_REGEX: SEARCH_BOOLEAN, SEARCH_BOOLEAN: SEARCH_SIMPLE}.get(mode, SEARCH_SIMPLE)
 
     @staticmethod
+    def _other_global_search_mode(mode: str, backwards: bool = False) -> str:
+        modes = (SEARCH_SIMPLE, SEARCH_REGEX, SEARCH_BOOLEAN, SEARCH_FUZZY)
+        try:
+            index = modes.index(mode)
+        except ValueError:
+            index = 0
+        return modes[(index + (-1 if backwards else 1)) % len(modes)]
+
+    @staticmethod
     def _search_mode_name(mode: str) -> str:
-        return {SEARCH_SIMPLE: "Simple", SEARCH_REGEX: "Regex", SEARCH_BOOLEAN: "Boolean"}.get(mode, mode.title())
+        return {SEARCH_SIMPLE: "Simple", SEARCH_REGEX: "Regex", SEARCH_BOOLEAN: "Boolean", SEARCH_FUZZY: "Fuzzy"}.get(mode, mode.title())
 
     def _preview_local_search(self) -> None:
         if self.prompt_mode != "search":
@@ -810,7 +833,7 @@ class MultiApp:
             content = [
                 core.paint("/ " + self.prompt_buffer, core.BOLD_LIGHT_CYAN, self.color),
                 "",
-                f"Mode: {mode_name} · Tab toggles Simple / Regex",
+                f"Mode: {mode_name} · Tab cycles Simple / Regex / Boolean",
             ]
             if self.prompt_search_mode == SEARCH_SIMPLE:
                 content.append("Simple: ordinary text is literal · * any text · ? one character")
@@ -829,91 +852,91 @@ class MultiApp:
         ]
         return _panel_lines("Regex highlight", content, width, height, self.color)
 
-    def _refresh_global_search_results(self) -> None:
-        pattern, error = compile_search(self.global_search_buffer, self.global_search_mode, self._search_flags())
-        self.global_search_error = error
-        self.global_search_truncated = False
-        if pattern is None:
-            self.global_search_results = []
-            self.global_search_selected = 0
-            return
+    def _global_search_signature(self):
+        return tuple(
+            (len(pane.snapshot_raw), pane.last_update_monotonic, pane.missing, pane.waiting, pane.name)
+            for pane in self.panes
+        )
 
-        results: List[GlobalSearchMatch] = []
-        for pane_index, pane in enumerate(self.panes):
-            for source_index, raw in enumerate(pane.snapshot_raw):
-                if not pane.display_filter.accepts(raw):
-                    continue
-                plain = raw.rstrip("\r\n")
-                match = pattern.search(plain)
-                if match is None:
-                    continue
-                results.append(GlobalSearchMatch(
-                    pane_index,
-                    source_index,
-                    pane.name,
-                    plain,
-                    match.start(),
-                    match.end(),
-                ))
-                if len(results) >= GLOBAL_SEARCH_LIMIT:
-                    self.global_search_truncated = True
-                    break
-            if self.global_search_truncated:
-                break
-        self.global_search_results = results
-        if results:
-            self.global_search_selected = min(max(0, self.global_search_selected), len(results) - 1)
+    def _global_search_corpus_data(self):
+        signature = self._global_search_signature()
+        if signature != self._global_search_corpus_signature:
+            self._global_search_corpus_signature = signature
+            self._global_search_corpus = build_corpus(self.panes)
+            self._global_search_cache_key = None
+        return signature, self._global_search_corpus
+
+    def _refresh_global_search_results(self) -> None:
+        signature, corpus = self._global_search_corpus_data()
+        key = (
+            self.global_search_buffer,
+            self.global_search_mode,
+            self.global_search_ignore_case,
+            self.global_search_sort,
+            self.global_search_file_filter,
+            signature,
+        )
+        if key == self._global_search_cache_key:
+            return
+        self._global_search_cache_key = key
+        page = search_corpus(
+            corpus,
+            self.global_search_buffer,
+            self.global_search_mode,
+            self._global_search_flags(),
+            file_filter=self.global_search_file_filter,
+            sort_mode=self.global_search_sort,
+            limit=GLOBAL_SEARCH_LIMIT,
+        )
+        self.global_search_results = page.results
+        self.global_search_error = page.error
+        self.global_search_truncated = page.truncated
+        if self.global_search_results:
+            self.global_search_selected = min(max(0, self.global_search_selected), len(self.global_search_results) - 1)
         else:
             self.global_search_selected = 0
+
+    def _cycle_global_search_file_filter(self, backwards: bool = False) -> None:
+        choices = [None] + list(range(len(self.panes)))
+        try:
+            index = choices.index(self.global_search_file_filter)
+        except ValueError:
+            index = 0
+        delta = -1 if backwards else 1
+        self.global_search_file_filter = choices[(index + delta) % len(choices)] if choices else None
+        self.global_search_selected = 0
+        self._refresh_global_search_results()
 
     def _global_search_lines(self, width: int, height: int) -> List[str]:
         self._refresh_global_search_results()
-        mode_name = self._search_mode_name(self.global_search_mode)
-        count = len(self.global_search_results)
-        count_label = f"{count}+ matches" if self.global_search_truncated else f"{count} match{'es' if count != 1 else ''}"
-        content: List[str] = [
-            core.paint("> " + self.global_search_buffer, core.BOLD_LIGHT_CYAN, self.color),
-            f"Mode: {mode_name} · Tab cycles Simple / Regex / Boolean · {count_label}",
-        ]
-        if self.global_search_mode == SEARCH_SIMPLE:
-            content.append("Simple: literal text · * any text · ? one character")
-        elif self.global_search_mode == SEARCH_REGEX:
-            content.append("Regex: Python regular-expression syntax")
+        if self.global_search_file_filter is None:
+            file_label = "[All files]"
+        elif 0 <= self.global_search_file_filter < len(self.panes):
+            file_label = f"[{self.panes[self.global_search_file_filter].name}]"
         else:
-            content.append("Boolean: AND / OR / NOT, parentheses and quoted phrases")
-        content.append("")
-
-        if self.global_search_error:
-            content.append(core.paint(f"Invalid search: {self.global_search_error}", core.BOLD_YELLOW, self.color))
-        elif not self.global_search_buffer:
-            content.append(core.paint("Type to search every currently watched file.", core.DIM, self.color))
-        elif not self.global_search_results:
-            content.append(core.paint("No matches.", core.DIM, self.color))
-        else:
-            visible_slots = max(3, min(12, height - 10))
-            selected = self.global_search_selected
-            start = max(0, selected - visible_slots // 2)
-            start = min(start, max(0, len(self.global_search_results) - visible_slots))
-            end = min(len(self.global_search_results), start + visible_slots)
-            preview_limit = max(18, min(80, width - 34))
-            for index in range(start, end):
-                result = self.global_search_results[index]
-                preview, pstart, pend = preview_around_match(
-                    result.text, result.match_start, result.match_end, preview_limit
-                )
-                if self.color and pend > pstart:
-                    preview = preview[:pstart] + "\x1b[7m" + preview[pstart:pend] + "\x1b[27m" + preview[pend:]
-                prefix = "▶" if index == selected else " "
-                label = f"[{result.pane_index + 1}] {result.pane_name}:{result.source_index + 1}"
-                row = f"{prefix} {label}  {preview}"
-                if index == selected:
-                    row = core.paint(row, core.BOLD_LIGHT_CYAN, self.color)
-                content.append(row)
-            if self.global_search_truncated:
-                content.append(core.paint(f"Showing first {GLOBAL_SEARCH_LIMIT} matches.", core.DIM, self.color))
-
-        content.extend(["", "↑/↓ select · Enter jump · Tab mode · Esc close"])
-        return _panel_lines("Global search", content, width, height, self.color)
+            file_label = "[All files]"
+        return render_global_search(
+            width,
+            height,
+            query=self.global_search_buffer,
+            mode=self.global_search_mode,
+            mode_labels=(
+                (SEARCH_SIMPLE, "Simple"),
+                (SEARCH_REGEX, "Regex"),
+                (SEARCH_BOOLEAN, "Boolean"),
+                (SEARCH_FUZZY, "Fuzzy"),
+            ),
+            ignore_case=self.global_search_ignore_case,
+            sort_mode=self.global_search_sort,
+            file_filter_label=file_label,
+            results=self.global_search_results,
+            selected=self.global_search_selected,
+            truncated=self.global_search_truncated,
+            error=self.global_search_error,
+            panes=self.panes,
+            preview_enabled=self.global_search_preview,
+            color=self.color,
+        )
 
     def _select_global_search_result(self) -> bool:
         self._refresh_global_search_results()
@@ -927,14 +950,19 @@ class MultiApp:
             self.maximized = False
         self.focus = result.pane_index
         pane = self.panes[result.pane_index]
-        error = pane.set_search(
-            self.global_search_buffer,
-            self._search_flags(),
-            mode=self.global_search_mode,
-        )
-        if error is not None:
-            self.global_search_error = error
-            return False
+        if self.global_search_mode == SEARCH_FUZZY:
+            fragment = result.text[result.match_start:result.match_end].strip()
+            if fragment:
+                pane.set_search(simple_escape(fragment), self._global_search_flags(), mode=SEARCH_SIMPLE)
+        else:
+            error = pane.set_search(
+                self.global_search_buffer,
+                self._global_search_flags(),
+                mode=self.global_search_mode,
+            )
+            if error is not None:
+                self.global_search_error = error
+                return False
         inner_w, body_h = self._active_pane_geometry()
         pane.jump_to_source_line(result.source_index, inner_w, body_h)
         pane.set_message(
@@ -986,7 +1014,8 @@ class MultiApp:
             "  c                  clear displayed history; tracking continues",
             "",
             "Global",
-            "  g                  live search across all watched files",
+            "  g                  global search: Simple / Regex / Boolean / Fuzzy",
+            "                     Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview",
             "  u                  check/install updates",
             "  ?                  close help",
             "  q                  quit",
@@ -1148,7 +1177,7 @@ class MultiApp:
         if self.palette_active:
             status = ["COMMAND PALETTE · type to filter · ↑↓ select · Enter apply · Esc close", "Background watching continues while this dialog is open"]
         elif self.global_search_active:
-            status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ select · Enter jump · Tab mode · Esc close", "Background watching continues while this dialog is open"]
+            status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ select · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close", "Background watching continues while this dialog is open"]
         elif self.prompt_mode:
             if self.prompt_mode == "search":
                 case = "NoCase" if self.prompt_ignore_case else "Case"
@@ -1272,9 +1301,31 @@ class MultiApp:
                 self.dirty = True
                 return False
             if key in ("TAB", "SHIFT_TAB"):
-                self.global_search_mode = self._other_search_mode(self.global_search_mode)
+                self.global_search_mode = self._other_global_search_mode(self.global_search_mode, key == "SHIFT_TAB")
+                self.global_search_sort = SORT_RELEVANCE if self.global_search_mode == SEARCH_FUZZY else SORT_FILE
                 self.global_search_selected = 0
                 self._refresh_global_search_results()
+                self.dirty = True
+                return False
+            if key == "CTRL_T":
+                self.global_search_ignore_case = not self.global_search_ignore_case
+                self.global_search_selected = 0
+                self._refresh_global_search_results()
+                self.dirty = True
+                return False
+            if key == "CTRL_O":
+                if self.global_search_mode == SEARCH_FUZZY:
+                    self.global_search_sort = SORT_FILE if self.global_search_sort == SORT_RELEVANCE else SORT_RELEVANCE
+                    self.global_search_selected = 0
+                    self._refresh_global_search_results()
+                self.dirty = True
+                return False
+            if key == "CTRL_F":
+                self._cycle_global_search_file_filter(False)
+                self.dirty = True
+                return False
+            if key == "CTRL_P":
+                self.global_search_preview = not self.global_search_preview
                 self.dirty = True
                 return False
             if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN"):
@@ -1455,6 +1506,8 @@ class MultiApp:
         if key in ("g", "G"):
             self.global_search_active = True
             self.global_search_selected = 0
+            self.global_search_file_filter = None
+            self.global_search_sort = SORT_RELEVANCE if self.global_search_mode == SEARCH_FUZZY else SORT_FILE
             self._refresh_global_search_results()
             self.dirty = True
             return False
@@ -1856,6 +1909,13 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     core.enable_windows_ansi()
+    if args.bundle_self_test:
+        backend = fuzzy_backend()
+        if backend == "unavailable":
+            print("htail bundle self-test failed: RapidFuzz unavailable", file=sys.stderr)
+            return 1
+        print(f"htail bundle self-test: {backend}")
+        return 0
     color = sys.stdout.isatty() and not args.no_color
     maybe_offer_self_install(args, color)
 
