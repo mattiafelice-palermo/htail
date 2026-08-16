@@ -45,13 +45,7 @@ class WatchNotice:
 
 
 def analyze_changes(old: Sequence[str], new: Sequence[str]) -> DiffAnalysis:
-    """Compute htail's diff events and current-row change indexes in one pass.
-
-    Older htail versions independently ran the position-anchored diff and then
-    repeated the same prefix/suffix/SequenceMatcher work to discover which
-    rows needed the cyan current-snapshot gutter. This routine produces both
-    outputs from one structural analysis.
-    """
+    """Compute htail's diff events and current-row change indexes in one pass."""
     old_keys = [core._line_identity(line) for line in old]
     new_keys = [core._line_identity(line) for line in new]
 
@@ -141,11 +135,7 @@ def analyze_changes(old: Sequence[str], new: Sequence[str]) -> DiffAnalysis:
 
 
 def _chunk_decode_safe(encoding: str) -> bool:
-    """Whether independently decoding newly appended bytes is safe enough.
-
-    Stateful/BOM-dependent encodings fall back to the verified full snapshot
-    path. UTF-8 and common single-byte encodings use the fast path.
-    """
+    """Whether independently decoding newly appended bytes is safe enough."""
     try:
         name = codecs.lookup(encoding).name.lower().replace('_', '-')
     except LookupError:
@@ -155,7 +145,13 @@ def _chunk_decode_safe(encoding: str) -> bool:
 
 
 class FileFollower:
-    """Non-blocking polling state machine for one watched file."""
+    """Verified follower whose expensive probes can be woken by native events.
+
+    ``notify()`` is only a scheduling hint. All content identity, debounce,
+    append-fast-path and periodic verified-snapshot rules remain here, so the
+    observable change semantics are identical whether a native backend exists
+    or callers fall back to polling.
+    """
 
     finished = False
 
@@ -173,15 +169,30 @@ class FileFollower:
         self._pending_signature = None
         self._pending_started: Optional[float] = None
         self._pending_last_change: Optional[float] = None
+        self._notification_hint = True
+        self.notification_gated = bool(getattr(args, 'notification_gated', False))
         self.fast_append_hits = 0
+        self.stat_probe_count = 0
 
     def close(self) -> None:
         return
+
+    def notify(self) -> None:
+        """Wake the next metadata probe after an OS filesystem notification."""
+        self._notification_hint = True
+
+    @property
+    def has_pending_change(self) -> bool:
+        return self._pending_started is not None
 
     def _reset_pending(self) -> None:
         self._pending_signature = None
         self._pending_started = None
         self._pending_last_change = None
+
+    def _signature(self):
+        self.stat_probe_count += 1
+        return core.file_signature(self.path)
 
     def initialize_if_available(self) -> Optional[WatchNotice]:
         if self.initialized:
@@ -199,9 +210,10 @@ class FileFollower:
         except OSError as exc:
             return WatchNotice("error", f"cannot read {self.path}: {exc}")
         self.previous = previous
-        self.signature = core.file_signature(self.path)
+        self.signature = self._signature()
         self.last_content_verify = time.monotonic()
         self.initialized = True
+        self._notification_hint = False
         resumed = self.file_missing
         self.file_missing = False
         return WatchNotice("resumed" if resumed else "initial", initial_tail=initial_tail)
@@ -240,7 +252,7 @@ class FileFollower:
             with self.path.open('rb') as handle:
                 handle.seek(old_size)
                 payload = handle.read()
-            after = core.file_signature(self.path)
+            after = self._signature()
         except OSError:
             return False, None
         if after != current_signature or not payload:
@@ -311,7 +323,6 @@ class FileFollower:
                 return WatchNotice("missing", f"waiting for {self.path}")
             return None
 
-        current_signature = core.file_signature(self.path)
         periodic_verify_due = (
             self.args.verify_interval > 0
             and now - self.last_content_verify >= self.args.verify_interval
@@ -322,6 +333,14 @@ class FileFollower:
         )
         verify_due = periodic_verify_due or active_verify_due
 
+        # Native notifications suppress redundant idle metadata probes. A
+        # pending debounced change must continue to be sampled until stable,
+        # and periodic verification remains the correctness safety net.
+        if self.notification_gated and not self._notification_hint and not self.has_pending_change and not verify_due:
+            return None
+        self._notification_hint = False
+
+        current_signature = self._signature()
         if current_signature is None:
             if not self.file_missing:
                 self.file_missing = True
