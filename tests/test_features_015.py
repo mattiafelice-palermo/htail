@@ -86,6 +86,10 @@ class PaneFeatureTests(unittest.TestCase):
         self.assertIn('LN', box.splitlines()[0])
         self.assertIn('NOWRAP', box.splitlines()[0])
         self.assertEqual(pane.horizontal_offset, 8)
+        pane.scroll_horizontal(10000, 30)
+        active_rows = pane._snapshot_visual_lines if pane.prefer_snapshot else pane._visual_lines
+        max_width = max((len(core.strip_ansi(row)) for row in active_rows), default=0)
+        self.assertLessEqual(pane.horizontal_offset, max(0, max_width - 30))
 
     def test_rate_and_heartbeat_status(self):
         pane = self.make_pane(False)
@@ -109,6 +113,8 @@ class PaneFeatureTests(unittest.TestCase):
         rendered = '\n'.join(pane.render_box(100, 6, True, 0))
         self.assertIn('\x1b]8;;https://example.com/very/long/path', rendered)
         self.assertNotIn('\x1b]8;;', core.strip_ansi(rendered))
+        clipped = core.clip_ansi('\x1b]8;;https://example.com\x1b\\https://example.com/long/path\x1b]8;;\x1b\\', 8)
+        self.assertTrue(clipped.endswith('\x1b]8;;\x1b\\' + core.RESET))
 
 
 class PaletteAndParserTests(unittest.TestCase):

@@ -462,7 +462,7 @@ class MultiApp:
             pseudo = Path(f"command-{command_index}.log")
             highlighter = core.SyntaxHighlighter(pseudo, args.syntax, color)
             label = f"$ {command}"
-            pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=label)
+            pane = Pane(pseudo, highlighter, display_filter, color, args.idle_warn, display_name=label, heartbeat_seconds=args.heartbeat)
             follower = CommandFollower(command, args, label=label)
             follower.initialize_if_available()
             pane.set_message(f"running pid {follower.process.pid}", 4.0)
@@ -1505,7 +1505,8 @@ class MultiApp:
         if key == "]":
             pane.next_update(); self.dirty = True; return False
         if key in ("LEFT", "RIGHT"):
-            pane.scroll_horizontal(-4 if key == "LEFT" else 4); self.dirty = True; return False
+            inner_w, _ = self._active_pane_geometry()
+            pane.scroll_horizontal(-4 if key == "LEFT" else 4, inner_w); self.dirty = True; return False
         if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN", "HOME", "END"):
             rect = next((r for i, r in self.last_rects if (i == self.focus or (i == -1 and self.layout == "stream"))), None)
             body_h = max(1, (rect.height - 2) if rect else self.content_dimensions()[1] - 2)

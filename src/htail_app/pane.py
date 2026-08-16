@@ -255,9 +255,9 @@ class Pane:
         return core.clip_ansi(text[raw:], width)
 
     def _viewport_row(self, row: str, width: int) -> str:
-        row = linkify_urls(row, self.color)
         if not self.wrap_enabled and self.horizontal_offset:
             row = self._slice_ansi(row, self.horizontal_offset, width)
+        row = linkify_urls(row, self.color)
         return _pad_ansi(row, width)
 
     def _numbered_rows(self, row: str, width: int, number: Optional[int], total: int) -> List[str]:
@@ -806,10 +806,15 @@ class Pane:
         self._mark_layout_dirty(); self._snapshot_layout_dirty = True
         self.set_message("wrap on" if self.wrap_enabled else "wrap off · ←/→ scroll")
 
-    def scroll_horizontal(self, delta: int) -> None:
+    def scroll_horizontal(self, delta: int, width: Optional[int] = None) -> None:
         if self.wrap_enabled:
             return
-        self.horizontal_offset = max(0, self.horizontal_offset + delta)
+        target = max(0, self.horizontal_offset + delta)
+        if width is not None:
+            rows = self._snapshot_visual_lines if self.prefer_snapshot and self.snapshot_raw else self._visual_lines
+            max_width = max((len(core.strip_ansi(row)) for row in rows), default=0)
+            target = min(target, max(0, max_width - max(1, width)))
+        self.horizontal_offset = target
 
     def toggle_follow_mode(self) -> None:
         self._startup_follow_eof = False

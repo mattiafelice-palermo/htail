@@ -163,7 +163,9 @@ def clip_ansi(text: str, width: int) -> str:
         room = width - visible
         out.append(text[pos : pos + room])
 
-    # Ensure styles cannot leak into the status bar / following line.
+    # Ensure styles and OSC-8 hyperlink state cannot leak into the following row.
+    if "\x1b]8;;" in text:
+        out.append("\x1b]8;;\x1b\\")
     out.append(RESET)
     return "".join(out)
 
