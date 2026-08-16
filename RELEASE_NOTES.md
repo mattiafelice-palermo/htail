@@ -1,3 +1,15 @@
+# htail 0.16.6
+
+## Global search preview
+
+- The selected preview line now automatically shifts horizontally to keep the matched text visible when the line is wider than the preview pane.
+- The preview keeps surrounding context lines at their normal left edge while using ellipses on the selected line to indicate clipped text.
+- Match highlighting now accounts for tab expansion before calculating the preview span.
+
+## Regression coverage
+
+- Added narrow-preview coverage for far-right matches, full global-search rendering, and tab-expanded highlight alignment.
+
 # htail 0.16.5
 
 ## Fuzzy search relevance
