@@ -25,7 +25,14 @@ _SGR_MOUSE = re.compile(r"^\x1b\[<(\d+);(\d+);(\d+)([Mm])$")
 
 def normalize_plain_key(ch: str) -> str:
     """Normalize single-byte terminal keys consistently across platforms."""
-    return {"\t": "TAB", "\x1b": "ESC", "\x14": "CTRL_T"}.get(ch, ch)
+    return {
+        "\t": "TAB",
+        "\x1b": "ESC",
+        "\x06": "CTRL_F",
+        "\x0f": "CTRL_O",
+        "\x10": "CTRL_P",
+        "\x14": "CTRL_T",
+    }.get(ch, ch)
 
 
 def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
@@ -108,12 +115,51 @@ class InputReader:
                 os.close(self._owned_fd)
             except OSError:
                 pass
-            self._owned_fd = None
+        self._fd = None
+        self._owned_fd = None
+        self.enabled = False
 
-    def poll(self) -> Optional[InputEvent]:
-        if not self.enabled:
+    def _read_byte(self) -> Optional[bytes]:
+        if self._fd is None:
             return None
-        return self._poll_windows() if os.name == "nt" else self._poll_posix()
+        try:
+            return os.read(self._fd, 1)
+        except BlockingIOError:
+            return None
+        except OSError:
+            return None
+
+    def _read_escape_sequence(self, first: bytes) -> str:
+        seq = first.decode("utf-8", errors="ignore")
+        deadline = time.monotonic() + 0.003
+        while time.monotonic() < deadline:
+            byte = self._read_byte()
+            if not byte:
+                time.sleep(0.0002)
+                continue
+            seq += byte.decode("utf-8", errors="ignore")
+            if seq.endswith(("~", "A", "B", "C", "D", "H", "F", "M", "m", "Z")):
+                break
+        return seq
+
+    def _poll_posix(self) -> Optional[InputEvent]:
+        if self._fd is None:
+            return None
+        try:
+            import select
+            ready, _, _ = select.select([self._fd], [], [], 0)
+        except Exception:
+            return None
+        if not ready:
+            return None
+        byte = self._read_byte()
+        if not byte:
+            return None
+        ch = byte.decode("utf-8", errors="ignore")
+        if ch != "\x1b":
+            return normalize_plain_key(ch)
+        seq = self._read_escape_sequence(byte)
+        return parse_escape_sequence(seq) or seq
 
     def _poll_windows(self) -> Optional[InputEvent]:
         try:
@@ -121,42 +167,18 @@ class InputReader:
             if not msvcrt.kbhit():
                 return None
             ch = msvcrt.getwch()
-            if ch in ("\x00", "\xe0") and msvcrt.kbhit():
+            if ch in ("\x00", "\xe0"):
                 special = msvcrt.getwch()
-                return {"H": "UP", "P": "DOWN", "M": "RIGHT", "K": "LEFT", "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END"}.get(special)
+                mapping = {
+                    "H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT",
+                    "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END",
+                }
+                return mapping.get(special)
             return normalize_plain_key(ch)
         except Exception:
             return None
 
-    def _poll_posix(self) -> Optional[InputEvent]:
-        try:
-            import select
-            if self._fd is None:
-                return None
-            fd = self._fd
-            ready, _, _ = select.select([fd], [], [], 0)
-            if not ready:
-                return None
-
-            def read_char() -> str:
-                data = os.read(fd, 1)
-                return data.decode("latin1") if data else ""
-
-            ch = read_char()
-            if ch != "\x1b":
-                return normalize_plain_key(ch)
-
-            seq = ch
-            deadline = time.monotonic() + 0.03
-            while time.monotonic() < deadline and len(seq) < 48:
-                more, _, _ = select.select([fd], [], [], 0.002)
-                if not more:
-                    break
-                seq += read_char()
-                if seq.startswith("\x1b[<") and seq[-1:] in ("M", "m"):
-                    break
-                if not seq.startswith("\x1b[<") and (seq.endswith("~") or seq in ("\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[H", "\x1b[F", "\x1bOH", "\x1bOF", "\x1b[Z")):
-                    break
-            return parse_escape_sequence(seq)
-        except Exception:
+    def poll(self) -> Optional[InputEvent]:
+        if not self.enabled:
             return None
+        return self._poll_windows() if os.name == "nt" else self._poll_posix()
