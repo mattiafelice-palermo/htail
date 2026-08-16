@@ -13,6 +13,7 @@ from .searching import SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label
 
 FOLLOW_CHANGES = "changes"
 FOLLOW_TAIL = "tail"
+SELECTED_SEARCH_STYLE = "\x1b[1;30;48;5;208m"
 
 
 @dataclass
@@ -100,7 +101,7 @@ def _inject_selected_regex_style(text: str, pattern: Optional[Pattern[str]]) -> 
         raw += 1
     boundaries[visible] = raw
 
-    selected_on = "\x1b[1;30;103m"
+    selected_on = SELECTED_SEARCH_STYLE
     for start, end in reversed(spans):
         raw_start = boundaries[start]
         raw_end = boundaries[end]
@@ -179,6 +180,7 @@ class Pane:
 
         self.search_pattern = ""
         self.search_mode = SEARCH_SIMPLE
+        self.search_flags = 0
         self.search_regex: Optional[Pattern[str]] = None
         self._search_last_target: Optional[int] = None
         self._search_match_position: Optional[int] = None
@@ -244,6 +246,7 @@ class Pane:
         if not expression:
             self.search_pattern = ""
             self.search_mode = mode
+            self.search_flags = flags
             self.search_regex = None
             self._search_last_target = None
             self._search_match_position = None
@@ -256,6 +259,7 @@ class Pane:
             return error
         self.search_pattern = expression
         self.search_mode = mode
+        self.search_flags = flags
         self.search_regex = compiled
         self._search_last_target = None
         self._refresh_search_position()
@@ -266,11 +270,11 @@ class Pane:
     def _search_display(self) -> str:
         return search_label(self.search_pattern, self.search_mode)
 
-    def search_state(self) -> Tuple[str, str, Optional[int]]:
-        return self.search_pattern, self.search_mode, self._search_last_target
+    def search_state(self) -> Tuple[str, str, int, Optional[int]]:
+        return self.search_pattern, self.search_mode, self.search_flags, self._search_last_target
 
-    def restore_search_state(self, state: Tuple[str, str, Optional[int]], flags: int = 0) -> None:
-        expression, mode, target = state
+    def restore_search_state(self, state: Tuple[str, str, int, Optional[int]]) -> None:
+        expression, mode, flags, target = state
         error = self.set_search(expression, flags, mode=mode)
         if error is None and target is not None and target in self._search_candidates():
             self._set_search_target(target)
@@ -278,11 +282,10 @@ class Pane:
     def search_badge_text(self) -> Optional[str]:
         if self.search_regex is None:
             return None
-        if self._search_match_position is not None:
-            return f"MATCH {self._search_match_position}/{self._search_match_total}"
-        if self._search_match_total == 1:
-            return "1 MATCH"
-        return f"{self._search_match_total} MATCHES"
+        if self._search_match_total <= 0:
+            return "0 MATCHES"
+        position = self._search_match_position or 0
+        return f"{position}/{self._search_match_total} MATCHES"
 
     def _search_candidates(self) -> List[int]:
         pattern = self.search_regex
@@ -355,6 +358,36 @@ class Pane:
         desired = max(0, visual - body_height // 2)
         self._snapshot_top = min(desired, self._snapshot_max_top(body_height))
         self._set_search_target(source_index)
+        return True
+
+    def select_search_match(self, ordinal: int, width: int, body_height: int) -> bool:
+        """Select one current match by ordinal without emitting a transient message."""
+        candidates = self._refresh_search_position()
+        if not candidates:
+            self._search_last_target = None
+            self._search_match_position = None
+            self._mark_layout_dirty()
+            self._snapshot_layout_dirty = True
+            return False
+        target = candidates[ordinal % len(candidates)]
+        width = max(1, width)
+        body_height = max(1, body_height)
+        self._startup_follow_eof = False
+        if self.follow_mode == FOLLOW_TAIL:
+            self.tail_auto_follow = False
+        if self.snapshot_raw:
+            self.prefer_snapshot = True
+            self._snapshot_anchor_pending = False
+            self._snapshot_tail_pending = False
+            self._ensure_snapshot_layout(width)
+            self._snapshot_top = min(
+                self._snapshot_source_to_visual[target],
+                self._snapshot_max_top(body_height),
+            )
+        else:
+            self._ensure_layout(width)
+            self.top = min(self._logical_to_visual[target], self._max_top(body_height))
+        self._set_search_target(target)
         return True
 
     def search_next(self, reverse: bool, width: int, body_height: int) -> bool:
@@ -861,34 +894,15 @@ class Pane:
         if self.prefer_snapshot and self.snapshot_raw:
             self._ensure_snapshot_layout(inner)
             self._snapshot_top = min(max(0, self._snapshot_top), self._snapshot_max_top(body_h))
-        badge_text = self.search_badge_text()
-        badge_plain = f"┤ {badge_text} ├" if badge_text else ""
-        # On very narrow panes, preserve the filename/state title rather than
-        # squeezing both labels into unreadable fragments.
-        if badge_plain and width < len(badge_plain) + 12:
-            badge_plain = ""
-            badge_text = None
-        badge_visible = len(badge_plain)
-        title_room = max(1, width - 4 - badge_visible)
-        title = self.title(index, title_room, focused, body_h)
-        title = core.clip_ansi(title, title_room)
+        title = self.title(index, max(1, width - 4), focused, body_h)
+        title = core.clip_ansi(title, max(1, width - 4))
         visible = len(core.strip_ansi(title))
-        remaining = max(0, width - 4 - visible - badge_visible)
-        if badge_plain:
-            top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + badge_plain + "─╮"
-        else:
-            top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + "─╮"
+        remaining = max(1, width - 3 - visible)
+        top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + "╮"
         if self.color:
             border_style = core.BOLD_LIGHT_CYAN if focused else core.DIM
-            top = core.paint("╭─", border_style, True) + title + core.paint("─" * remaining, border_style, True)
-            if badge_text is not None:
-                top += core.paint("┤", border_style, True)
-                badge_style = "\x1b[1;30;106m" if focused else core.DIM
-                top += core.paint(f" {badge_text} ", badge_style, True)
-                top += core.paint("├─╮", border_style, True)
-            else:
-                top += core.paint("─╮", border_style, True)
-            side = core.paint("│", core.BOLD_LIGHT_CYAN if focused else core.DIM, True)
+            top = core.paint("╭─", border_style, True) + title + core.paint("─" * remaining + "╮", border_style, True)
+            side = core.paint("│", border_style, True)
         else:
             top = top_plain
             side = "│"

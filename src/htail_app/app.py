@@ -398,7 +398,8 @@ class MultiApp:
         self.prompt_buffer = ""
         self.prompt_search_mode = SEARCH_SIMPLE
         self.prompt_error: Optional[str] = None
-        self.prompt_restore_state: Optional[Tuple[str, str, Optional[int]]] = None
+        self.prompt_restore_state: Optional[Tuple[str, str, int, Optional[int]]] = None
+        self.prompt_ignore_case = bool(args.ignore_case)
         self.global_search_active = False
         self.global_search_buffer = ""
         self.global_search_mode = SEARCH_SIMPLE
@@ -556,8 +557,12 @@ class MultiApp:
             focused = index == self.focus if index >= 0 else True
             box_index = index if index >= 0 else 0
             inline_search = self.prompt_mode == "search" and focused and rect.height >= 4
-            render_height = rect.height - 1 if inline_search else rect.height
+            match_status = pane.search_regex is not None and rect.height >= (5 if inline_search else 4)
+            reserve = (1 if inline_search else 0) + (1 if match_status else 0)
+            render_height = rect.height - reserve
             box = pane.render_box(rect.width, render_height, focused, box_index)
+            if match_status:
+                box.insert(1, self._match_status_row(rect.width, pane, focused))
             if inline_search:
                 box.insert(max(1, len(box) - 1), self._inline_search_row(rect.width, pane))
             for local_y, row in enumerate(box):
@@ -583,6 +588,9 @@ class MultiApp:
     def _search_flags(self) -> int:
         return re.IGNORECASE if self.args.ignore_case else 0
 
+    def _local_search_flags(self) -> int:
+        return re.IGNORECASE if self.prompt_ignore_case else 0
+
     @staticmethod
     def _other_search_mode(mode: str) -> str:
         return SEARCH_REGEX if mode == SEARCH_SIMPLE else SEARCH_SIMPLE
@@ -594,20 +602,42 @@ class MultiApp:
     def _preview_local_search(self) -> None:
         if self.prompt_mode != "search":
             return
-        self.prompt_error = self.active_pane().set_search(
+        pane = self.active_pane()
+        self.prompt_error = pane.set_search(
             self.prompt_buffer,
-            self._search_flags(),
+            self._local_search_flags(),
             mode=self.prompt_search_mode,
         )
+        if self.prompt_error is None and self.prompt_buffer:
+            inner_w, body_h = self._active_pane_geometry()
+            pane.select_search_match(0, inner_w, body_h)
 
     def _cancel_local_search(self) -> None:
         pane = self.active_pane()
         if self.prompt_restore_state is not None:
-            pane.restore_search_state(self.prompt_restore_state, self._search_flags())
+            pane.restore_search_state(self.prompt_restore_state)
         self.prompt_restore_state = None
         self.prompt_error = None
         self.prompt_mode = None
         self.prompt_buffer = ""
+
+    def _match_status_row(self, width: int, pane: Pane, focused: bool) -> str:
+        width = max(1, width)
+        if width < 4:
+            return " " * width
+        inner = width - 2
+        label = pane.search_badge_text() or "0 MATCHES"
+        badge_plain = f" {label} "
+        if len(badge_plain) > inner:
+            badge_plain = badge_plain[-inner:]
+        gap = max(0, inner - len(badge_plain))
+        if self.color:
+            side_style = core.BOLD_LIGHT_CYAN if focused else core.DIM
+            side = core.paint("│", side_style, True)
+            badge_style = "\x1b[1;30;106m" if focused else core.DIM
+            content = (" " * gap) + core.paint(badge_plain, badge_style, True)
+            return _pad(side + _pad(content, inner) + side, width)
+        return _pad("│" + (" " * gap) + badge_plain + "│", width)
 
     def _inline_search_row(self, width: int, pane: Pane) -> str:
         width = max(1, width)
@@ -615,14 +645,16 @@ class MultiApp:
             return " " * width
         inner = width - 2
         mode_name = self._search_mode_name(self.prompt_search_mode)
+        next_mode = self._search_mode_name(self._other_search_mode(self.prompt_search_mode))
+        case_name = "NoCase" if self.prompt_ignore_case else "Case"
+        next_case = "Case" if self.prompt_ignore_case else "NoCase"
         if self.prompt_error:
-            status_text = "INVALID REGEX"
-        elif not self.prompt_buffer:
-            status_text = "type to search"
+            hints = f"INVALID REGEX · Tab→{next_mode} · Ctrl+T→{next_case} · Esc"
+        elif self.prompt_buffer:
+            hints = f"↑↓ matches · Tab→{next_mode} · Ctrl+T→{next_case} · Esc"
         else:
-            count = pane._search_match_total if pane.search_regex is not None else 0
-            status_text = f"{count} match{'es' if count != 1 else ''}"
-        suffix_plain = f"  {mode_name} · {status_text}"
+            hints = f"Tab→{next_mode} · Ctrl+T→{next_case} · Esc"
+        suffix_plain = f"  {mode_name} · {case_name} · {hints}"
         fixed = 2 + 1 + 1 + len(suffix_plain)
         query_room = max(0, inner - fixed)
         query = self.prompt_buffer
@@ -639,9 +671,10 @@ class MultiApp:
             prefix = core.paint("/ ", core.BOLD_LIGHT_CYAN, True)
             cursor = core.paint("▌", core.BOLD_LIGHT_CYAN, True)
             mode = core.paint(mode_name, "\x1b[1;30;106m", True)
-            status_style = core.BOLD_YELLOW if self.prompt_error else core.DIM
-            status = core.paint(status_text, status_style, True)
-            content = prefix + query + cursor + (" " * gap) + "  " + mode + " · " + status
+            case = core.paint(case_name, "\x1b[1;30;106m", True)
+            hint_style = core.BOLD_YELLOW if self.prompt_error else core.DIM
+            hint_text = core.paint(hints, hint_style, True)
+            content = prefix + query + cursor + (" " * gap) + "  " + mode + " · " + case + " · " + hint_text
             return _pad(side + _pad(content, inner) + side, width)
 
         content = left_plain + (" " * gap) + suffix_plain
@@ -790,7 +823,8 @@ class MultiApp:
     def _active_pane_geometry(self) -> Tuple[int, int]:
         target = -1 if self.layout == "stream" else self.focus
         rect = next((rect for index, rect in self.last_rects if index == target), None)
-        reserve = 1 if self.prompt_mode == "search" else 0
+        pane = self.active_pane()
+        reserve = (1 if self.prompt_mode == "search" else 0) + (1 if pane.search_regex is not None else 0)
         if rect is None:
             width, height, _ = self.content_dimensions()
             return max(1, width - 2), max(1, height - 2 - reserve)
@@ -811,8 +845,9 @@ class MultiApp:
             "  z                  maximize focused pane / restore layout",
             "",
             "Focused pane",
-            "  /                  search focused pane; Tab toggles Simple / Regex",
-            "  n / N              next / previous local match",
+            "  /                  inline search; ↑/↓ cycle matches while typing",
+            "  Ctrl+T             toggle Case / NoCase inside local search",
+            "  n / N              next / previous committed local match",
             "  h                  set regex highlight; H clears it",
             "  ↑ ↓ / PgUp PgDn    scroll",
             "  [ / ]              previous / next update",
@@ -983,7 +1018,8 @@ class MultiApp:
             status = [f"GLOBAL SEARCH · {self._search_mode_name(self.global_search_mode)} · ↑↓ select · Enter jump · Tab mode · Esc close", "Background watching continues while this dialog is open"]
         elif self.prompt_mode:
             if self.prompt_mode == "search":
-                status = [f"SEARCH · {self._search_mode_name(self.prompt_search_mode)} · live highlight · Tab mode · Enter apply · Esc cancel", "Search field is attached to the focused pane; background watching continues"]
+                case = "NoCase" if self.prompt_ignore_case else "Case"
+                status = [f"SEARCH · {self._search_mode_name(self.prompt_search_mode)} · {case} · ↑↓ match · Tab mode · Ctrl+T case · Enter apply · Esc close", "Search field is attached to the focused pane; background watching continues"]
             else:
                 status = ["REGEX HIGHLIGHT · Enter apply · Esc cancel", "Background watching continues while this dialog is open"]
         elif self.update_confirm_active:
@@ -1132,21 +1168,28 @@ class MultiApp:
                 self._preview_local_search()
                 self.dirty = True
                 return False
+            if key == "CTRL_T" and self.prompt_mode == "search":
+                self.prompt_ignore_case = not self.prompt_ignore_case
+                self._preview_local_search()
+                self.dirty = True
+                return False
+            if key in ("UP", "DOWN") and self.prompt_mode == "search":
+                if self.prompt_error is None and self.prompt_buffer:
+                    pane = self.active_pane()
+                    inner_w, body_h = self._active_pane_geometry()
+                    pane.search_next(key == "UP", inner_w, body_h)
+                self.dirty = True
+                return False
             if key in ("\r", "\n"):
                 pane = self.active_pane()
-                flags = self._search_flags()
                 if self.prompt_mode == "search":
-                    error = pane.set_search(self.prompt_buffer, flags, mode=self.prompt_search_mode)
-                    self.prompt_error = error
-                    if error is not None:
+                    if self.prompt_error is not None:
                         self.dirty = True
                         return False
-                    inner_w, body_h = self._active_pane_geometry()
-                    pane.search_next(False, inner_w, body_h)
                     self.prompt_restore_state = None
                     self.prompt_error = None
                 else:
-                    error = pane.set_highlight(self.prompt_buffer, flags)
+                    error = pane.set_highlight(self.prompt_buffer, self._search_flags())
                     if error is None:
                         pane.set_message(f"highlight /{self.prompt_buffer}/" if self.prompt_buffer else "regex highlight cleared")
                     if error is not None:
@@ -1249,6 +1292,7 @@ class MultiApp:
             self.prompt_mode = "search"
             self.prompt_buffer = pane.search_pattern
             self.prompt_search_mode = pane.search_mode if pane.search_pattern else SEARCH_SIMPLE
+            self.prompt_ignore_case = bool(pane.search_flags & re.IGNORECASE) if pane.search_pattern else bool(self.args.ignore_case)
             self.prompt_error = None
             self.dirty = True
             return False
