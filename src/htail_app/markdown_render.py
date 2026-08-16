@@ -175,7 +175,9 @@ class MarkdownTableHighlighter(_BaseSyntaxHighlighter):
             if in_fence:
                 code = body
                 if fence_lexer is not None and code_formatter is not None:
-                    styled = core.highlight(code + "\n", fence_lexer, code_formatter).rstrip("\r\n")
+                    styled = core.pygments_highlight(
+                        code + "\n", fence_lexer, code_formatter
+                    ).rstrip("\r\n")
                 else:
                     styled = core.paint(code, core.MAGENTA, self.color)
                 rendered.append("  " + styled)

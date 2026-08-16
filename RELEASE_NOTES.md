@@ -1,3 +1,14 @@
+# htail 0.16.11
+
+## New features
+
+- None.
+
+## Bug fixes
+
+- Fixed a 0.16.10 startup crash when rendered Markdown contains fenced code blocks. The app-layer Markdown renderer now uses the existing frozen-core Pygments helper correctly.
+- Added regression coverage for fenced Markdown code rendering through the app-layer highlighter extension.
+
 # htail 0.16.10
 
 ## New features

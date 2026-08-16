@@ -28,6 +28,16 @@ class RemotePaneIdentityTests(unittest.TestCase):
 
 
 class MarkdownTableTests(unittest.TestCase):
+    def test_markdown_fenced_code_renders_through_app_extension(self):
+        highlighter = core.SyntaxHighlighter(Path("code.md"), "markdown", True)
+        rendered = [core.strip_ansi(row) for row in highlighter.render_lines([
+            "```python\n",
+            "print('hello')\n",
+            "```\n",
+        ])]
+        self.assertEqual(len(rendered), 3)
+        self.assertIn("print('hello')", rendered[1])
+
     def test_markdown_table_is_aligned_and_separator_is_rendered(self):
         highlighter = core.SyntaxHighlighter(Path("table.md"), "markdown", True)
         rendered = [core.strip_ansi(row) for row in highlighter.render_lines([

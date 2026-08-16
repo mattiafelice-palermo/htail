@@ -1,6 +1,6 @@
 """htail application package."""
 
-VERSION = "0.16.10"
+VERSION = "0.16.11"
 
 # Keep the frozen compatibility core unchanged on disk while layering current
 # application rendering features onto its highlighter API.
