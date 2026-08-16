@@ -25,5 +25,13 @@ if text.count(old_history) != 1:
     raise RuntimeError(f'history search marker count={text.count(old_history)}')
 text = text.replace(old_history, new_history, 1)
 
+old_normalizer = '''    'def _normalize_intentional_ui(text: str) -> str:\\n    # 0.12.0 intentionally exposes the default follow mode in pane titles.\\n    # Strip only that new label when comparing invariant behavior to v0.9.0.\\n    return text.replace(" · CHANGES", "")\\n\\n\\ndef _plain(core, rows):\\n    return [_normalize_intentional_ui(core.strip_ansi(row)) for row in rows]\\n',
+'''
+new_normalizer = '''    'def _normalize_intentional_ui(text: str) -> str:\\n    # 0.12.0 intentionally exposes the default follow mode in pane titles.\\n    # Remove only that label and restore the same top-border width before\\n    # comparing invariant content/render behavior to v0.9.0.\\n    marker = " · CHANGES"\\n    count = text.count(marker)\\n    if not count:\\n        return text\\n    text = text.replace(marker, "")\\n    if text.startswith("╭") and "╮" in text:\\n        end = text.rfind("╮")\\n        text = text[:end] + ("─" * (len(marker) * count)) + text[end:]\\n    return text\\n\\n\\ndef _plain(core, rows):\\n    return [_normalize_intentional_ui(core.strip_ansi(row)) for row in rows]\\n',
+'''
+if text.count(old_normalizer) != 1:
+    raise RuntimeError(f'reference normalizer marker count={text.count(old_normalizer)}')
+text = text.replace(old_normalizer, new_normalizer, 1)
+
 path.write_text(text, encoding='utf-8')
 runpy.run_path(str(path), run_name='__main__')
