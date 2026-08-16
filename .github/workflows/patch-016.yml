@@ -18,6 +18,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check RapidFuzz==3.14.5
       - name: Apply product patch
         run: |
           if grep -q 'VERSION = "0.16.0"' src/htail_app/__init__.py; then
