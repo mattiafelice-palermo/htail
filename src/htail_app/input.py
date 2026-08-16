@@ -23,6 +23,11 @@ InputEvent = Union[str, MouseEvent]
 _SGR_MOUSE = re.compile(r"^\x1b\[<(\d+);(\d+);(\d+)([Mm])$")
 
 
+def normalize_plain_key(ch: str) -> str:
+    """Normalize single-byte terminal keys consistently across platforms."""
+    return {"\t": "TAB", "\x1b": "ESC", "\x14": "CTRL_T"}.get(ch, ch)
+
+
 def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
     mapping = {
         "\x1b[A": "UP", "\x1b[B": "DOWN", "\x1b[5~": "PAGEUP",
@@ -119,7 +124,7 @@ class InputReader:
             if ch in ("\x00", "\xe0") and msvcrt.kbhit():
                 special = msvcrt.getwch()
                 return {"H": "UP", "P": "DOWN", "I": "PAGEUP", "Q": "PAGEDOWN", "G": "HOME", "O": "END"}.get(special)
-            return "TAB" if ch == "\t" else ch
+            return normalize_plain_key(ch)
         except Exception:
             return None
 
@@ -139,7 +144,7 @@ class InputReader:
 
             ch = read_char()
             if ch != "\x1b":
-                return "TAB" if ch == "\t" else ch
+                return normalize_plain_key(ch)
 
             seq = ch
             deadline = time.monotonic() + 0.03

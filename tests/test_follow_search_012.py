@@ -109,20 +109,20 @@ class SearchSelectionTests(unittest.TestCase):
         self.assertTrue(pane.search_next(False, 40, 4))
         pane.render_box(40, 6, True, 0)
         self.assertEqual((pane._search_match_position, pane._search_match_total), (1, 3))
-        self.assertIn("MATCH 1/3", core.strip_ansi(pane.render_box(100, 6, True, 0)[0]))
+        self.assertEqual(pane.search_badge_text(), "1/3 MATCHES")
         selected_rows = pane._snapshot_visual_lines
-        self.assertTrue(any("\x1b[1;30;103m" in row and "foo" in core.strip_ansi(row) for row in selected_rows))
+        self.assertTrue(any("\x1b[1;30;48;5;208m" in row and "foo" in core.strip_ansi(row) for row in selected_rows))
         self.assertTrue(any("\x1b[7m" in row and "foo" in core.strip_ansi(row) for row in selected_rows))
 
         self.assertTrue(pane.search_next(False, 40, 4))
         pane.render_box(40, 6, True, 0)
         self.assertEqual(pane._search_match_position, 2)
-        self.assertIn("MATCH 2/3", core.strip_ansi(pane.render_box(100, 6, True, 0)[0]))
+        self.assertEqual(pane.search_badge_text(), "2/3 MATCHES")
 
         self.assertTrue(pane.search_next(False, 40, 4))
         self.assertTrue(pane.search_next(False, 40, 4))
         self.assertEqual(pane._search_match_position, 1)
-        self.assertIn("MATCH 1/3", core.strip_ansi(pane.render_box(100, 6, True, 0)[0]))
+        self.assertEqual(pane.search_badge_text(), "1/3 MATCHES")
 
     def test_simple_search_selected_match_and_counter(self):
         self.assert_selected_progress(SEARCH_SIMPLE)

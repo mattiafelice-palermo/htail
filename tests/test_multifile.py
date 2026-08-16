@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 
-from htail_app.input import MouseEvent, parse_escape_sequence
+from htail_app.input import MouseEvent, normalize_plain_key, parse_escape_sequence
 from htail_app.layout import pane_rects, resolve_auto
 from htail_app.watcher import FileFollower, WatchUpdate
 
@@ -43,6 +43,10 @@ class InputTests(unittest.TestCase):
 
     def test_shift_tab(self):
         self.assertEqual(parse_escape_sequence("\x1b[Z"), "SHIFT_TAB")
+
+    def test_plain_escape_and_ctrl_t_are_normalized(self):
+        self.assertEqual(normalize_plain_key("\x1b"), "ESC")
+        self.assertEqual(normalize_plain_key("\x14"), "CTRL_T")
 
 
 class WatcherTests(unittest.TestCase):

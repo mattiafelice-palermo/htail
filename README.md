@@ -71,7 +71,9 @@ Press `l` while htail is running to switch layout without restarting. Pane scrol
 | Key / input | Action |
 |---|---|
 | `/` | Open the focused pane's inline live search field |
-| `n` / `N` | Jump to next / previous search match, wrapping at the ends |
+| `↑` / `↓` while searching | Previous / next live match |
+| `Ctrl+T` while searching | Toggle Case / NoCase matching |
+| `n` / `N` | Jump to next / previous committed search match, wrapping at the ends |
 | `h` | Enter a persistent regex highlight for the focused pane |
 | `H` | Clear the focused pane's regex highlight |
 | `Tab` / `Shift+Tab` | Focus next / previous pane |
@@ -92,13 +94,13 @@ Press `l` while htail is running to switch layout without restarting. Pane scrol
 | `?` | Toggle help |
 | `q` | Quit |
 
-Simple search is the default; `Tab` switches the inline field to explicit regex mode. `-I` / `--ignore-case` applies to both. Matches highlight live while you type. Non-selected matches use reverse video, while the currently selected `n` / `N` match uses guaranteed black-on-bright-yellow contrast. Match progress appears as a high-contrast badge on the pane's top-right border. Persistent regex highlights use underline so existing syntax colors remain visible.
+Simple search is the default; `Tab` switches the inline field to explicit regex mode. `-I` / `--ignore-case` sets the initial case behavior, and `Ctrl+T` toggles Case / NoCase interactively. Matches highlight live while you type: the first match is selected immediately, `↑` / `↓` cycle through results without closing the editor, and the selected match uses high-contrast black-on-orange. Match progress appears as a prominent `x/y MATCHES` badge inside the pane. Persistent regex highlights use underline so existing syntax colors remain visible.
 
 Mouse tracking can be disabled with `--no-mouse`. Keyboard controls always remain available.
 
 ### Search
 
-Press `/` for search inside the focused pane. A compact search field attaches to the bottom of that pane instead of opening a modal, so matching text remains visible and updates live while you type. Search opens in **Simple** mode: ordinary text is literal, `*` means any text and `?` means one character. Press `Tab` in the field to switch to explicit Python-regex mode, `Enter` to commit, or `Esc` to restore the previous search. After applying a search, `n` / `N` move between matches.
+Press `/` for search inside the focused pane. A compact search field attaches to the bottom of that pane instead of opening a modal, so matching text remains visible and updates live while you type. Search opens in **Simple** mode: ordinary text is literal, `*` means any text and `?` means one character. The first match is selected immediately; use `↑` / `↓` to cycle results while still editing. Press `Tab` to switch to explicit Python-regex mode, `Ctrl+T` to toggle Case / NoCase, `Enter` to commit, or `Esc` to restore the previous search and close the editor. After applying a search, `n` / `N` move between matches.
 
 Examples:
 

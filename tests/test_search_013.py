@@ -21,19 +21,18 @@ class SearchContrastAndBadgeTests(unittest.TestCase):
         pane.search_next(False, 60, 4)
         return pane
 
-    def test_selected_match_is_guaranteed_black_on_bright_yellow(self):
+    def test_selected_match_is_guaranteed_black_on_orange(self):
         pane = self.make_pane()
         pane.render_box(60, 7, True, 0)
         selected = pane._snapshot_visual_lines[pane._snapshot_source_to_visual[pane._search_last_target]]
-        self.assertIn("\x1b[1;30;103m", selected)
+        self.assertIn("\x1b[1;30;48;5;208m", selected)
         self.assertIn("foo", core.strip_ansi(selected))
 
-    def test_match_progress_is_a_top_right_border_badge(self):
+    def test_match_progress_is_no_longer_embedded_in_top_border(self):
         pane = self.make_pane()
         top = core.strip_ansi(pane.render_box(80, 7, True, 0)[0])
-        self.assertIn("┤ MATCH 1/3 ├", top)
-        self.assertGreater(top.index("MATCH 1/3"), 50)
-        self.assertNotIn("MATCH", core.strip_ansi(pane.title(0, 80, True, 5)))
+        self.assertNotIn("MATCH", top)
+        self.assertEqual(pane.search_badge_text(), "1/3 MATCHES")
 
 
 class InlineSearchTests(unittest.TestCase):
