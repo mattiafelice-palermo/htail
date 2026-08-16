@@ -27,27 +27,14 @@ jobs:
           from pathlib import Path
           p = Path('src/htail_app/app.py')
           text = p.read_text(encoding='utf-8')
-          old = '''            if key == "CTRL_T":
-              self.global_search_ignore_case = not self.global_search_ignore_case
-              self.global_search_selected = 0
-              self._refresh_global_search_results()
-              self.dirty = True
-              return False
-          '''
-          new = '''            if key == "CTRL_T":
-              self.global_search_ignore_case = not self.global_search_ignore_case
-              self.global_search_selected = 0
-              self._refresh_global_search_results()
-              self._expand_selected_global_search_file()
-              self.dirty = True
-              return False
-          '''
-          # Normalize indentation in the literal anchors to the source's 12/16-space levels.
-          old = old.replace('\n              ', '\n                ').replace('            if key', '            if key')
-          new = new.replace('\n              ', '\n                ').replace('            if key', '            if key')
-          if old not in text:
-              raise SystemExit('case-toggle anchor not found')
-          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+          marker = 'self.global_search_ignore_case = not self.global_search_ignore_case'
+          start = text.index(marker)
+          refresh = text.index('self._refresh_global_search_results()', start)
+          dirty = text.index('                self.dirty = True', refresh)
+          insertion = '                self._expand_selected_global_search_file()\n'
+          if insertion.strip() not in text[refresh:dirty]:
+              text = text[:dirty] + insertion + text[dirty:]
+          p.write_text(text, encoding='utf-8')
           PY
       - name: Test
         run: |
