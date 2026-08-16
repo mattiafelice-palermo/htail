@@ -23,12 +23,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: tools/bundle-requirements.txt
 
       - name: Install test dependency
         run: python -m pip install --disable-pip-version-check RapidFuzz==3.14.5
 
       - name: Build standalone executable
         run: python tools/build_release.py --output dist/htail
+
+      - name: Build native runtime assets
+        run: python tools/build_runtime.py --output-dir dist
 
       - name: Resolve release version
         id: version
@@ -53,8 +58,8 @@ jobs:
           PYTHONPATH: src
         run: python benchmarks/reference_compare.py --reference v0.9.0
 
-      - name: Smoke test bundled native dependencies
-        run: python dist/htail --bundle-self-test
+      - name: Smoke test native runtime asset
+        run: python tools/build_runtime.py --self-test dist/htail-runtime-cp313.zip
 
       - name: Check existing release
         id: existing
@@ -86,6 +91,9 @@ jobs:
         run: |
           chmod +x dist/htail
           sha256sum dist/htail > dist/htail.sha256
+          for runtime in dist/htail-runtime-*.zip; do
+            sha256sum "$runtime" > "$runtime.sha256"
+          done
 
       - name: Create GitHub Release
         if: steps.existing.outputs.exists != 'true'
@@ -98,4 +106,5 @@ jobs:
             --target "$(git rev-parse HEAD)" \
             --title "$TAG" \
             --notes-file RELEASE_NOTES.md \
-            dist/htail dist/htail.sha256
+            dist/htail dist/htail.sha256 \
+            dist/htail-runtime-*.zip dist/htail-runtime-*.zip.sha256
