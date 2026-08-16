@@ -86,7 +86,17 @@ class Htail084Regressions(unittest.TestCase):
             os.close(write_fd)
 
     def test_update_service_reports_download_progress_and_install_phases(self):
-        content = b'#!/usr/bin/env python3\nHTAIL_VERSION = "9.9.9"\nprint("ok")\n'
+        content = (
+            "#!/usr/bin/env python3\n"
+            'HTAIL_VERSION = "9.9.9"\n'
+            "import sys\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('htail 9.9.9')\n"
+            "elif sys.argv[1:] == ['--bundle-self-test']:\n"
+            "    print('htail bundle self-test: app 9.9.9')\n"
+            "else:\n"
+            "    print('ok')\n"
+        ).encode()
         checksum = (hashlib.sha256(content).hexdigest() + '  htail\n').encode()
         release = core.ReleaseInfo('9.9.9', 'v9.9.9', 'https://example/htail', 'htail', 'https://example/sha')
         events = []
@@ -105,6 +115,7 @@ class Htail084Regressions(unittest.TestCase):
         self.assertIn('Verifying release SHA-256 checksum…', stages)
         self.assertIn('Backing up current executable…', stages)
         self.assertIn('Installing update…', stages)
+        self.assertIn('Verifying installed application…', stages)
 
     def test_cli_progress_renders_bar_and_percentage(self):
         stream = TTYBuffer()

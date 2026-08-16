@@ -54,7 +54,15 @@ class RuntimeUpdateTests(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             'HTAIL_VERSION = "9.9.9"\n'
             f'HTAIL_RUNTIME_ID = "{runtime_id}"\n'
-            'print("new")\n'
+            "import sys\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('htail 9.9.9')\n"
+            "elif sys.argv[1:] == ['--bundle-self-test']:\n"
+            "    print('htail bundle self-test: app 9.9.9')\n"
+            "elif sys.argv[1:] == ['--prepare-core']:\n"
+            "    pass\n"
+            "else:\n"
+            "    print('new')\n"
         ).encode()
         runtime_content = self.make_runtime(runtime_id, abi)
         core_digest = hashlib.sha256(new_source).hexdigest().encode()
@@ -106,10 +114,56 @@ class RuntimeUpdateTests(unittest.TestCase):
         self.assertTrue(any(stage.startswith("Downloading runtime cp313") for stage in labels))
         self.assertTrue(any(stage.startswith("Verifying runtime cp313") for stage in labels))
         self.assertIn("Unpacking application…", labels)
+        self.assertIn("Verifying installed application…", labels)
         unpack = [(current, total) for stage, current, total in stages if stage.startswith("Unpacking runtime cp313")]
         self.assertTrue(unpack)
         self.assertEqual(unpack[-1][0], unpack[-1][1])
         self.assertLess(labels.index(next(stage for stage in labels if stage.startswith("Unpacking runtime"))), labels.index("Installing update…"))
+        self.assertLess(labels.index("Installing update…"), labels.index("Verifying installed application…"))
+
+    def test_failed_installed_bundle_self_test_restores_backup(self):
+        new_source = (
+            "#!/usr/bin/env python3\n"
+            'HTAIL_VERSION = "9.9.9"\n'
+            "import sys\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('htail 9.9.9')\n"
+            "elif sys.argv[1:] == ['--bundle-self-test']:\n"
+            "    print('broken bundle', file=sys.stderr)\n"
+            "    raise SystemExit(7)\n"
+            "elif sys.argv[1:] == ['--prepare-core']:\n"
+            "    pass\n"
+        ).encode()
+        digest = hashlib.sha256(new_source).hexdigest().encode()
+        release = core.ReleaseInfo(
+            version="9.9.9",
+            tag="v9.9.9",
+            asset_url="https://example.invalid/htail",
+            asset_name="htail",
+            checksum_url="https://example.invalid/htail.sha256",
+        )
+        payloads = {
+            release.asset_url: new_source,
+            release.checksum_url: digest + b"  htail\n",
+        }
+
+        def fake_urlopen(request, timeout=None):
+            return self.FakeResponse(payloads[request.full_url])
+
+        service = core.UpdateService("example/repo", asset_name="htail")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "ht"
+            old_source = b'#!/usr/bin/env python3\nprint("old")\n'
+            target.write_bytes(old_source)
+            target.chmod(0o755)
+            with mock.patch.object(core.urllib.request, "urlopen", side_effect=fake_urlopen):
+                ok, message = service.install(release, target)
+
+            self.assertFalse(ok)
+            self.assertIn("restored backup", message)
+            self.assertIn("broken bundle", message)
+            self.assertEqual(target.read_bytes(), old_source)
 
 
 if __name__ == "__main__":

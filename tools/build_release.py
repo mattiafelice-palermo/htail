@@ -42,10 +42,32 @@ def _write(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     archive.writestr(info, data)
 
 
-def build_payload() -> bytes:
+def build_payload(version: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        _write(archive, "launcher.py", b"from htail_app.app import main\nraise SystemExit(main())\n")
+        _write(
+            archive,
+            "launcher.py",
+            b'''from __future__ import annotations
+
+import os
+from pathlib import Path
+import sys
+
+# The wrapper may be restarted from an older htail process whose environment
+# still contains an old extracted application. Select this payload explicitly,
+# and discard any htail modules a sitecustomize hook may have pre-imported.
+app_root = Path(__file__).resolve().parent / "app"
+for name in list(sys.modules):
+    if name == "htail_app" or name.startswith("htail_app."):
+        del sys.modules[name]
+sys.path.insert(0, str(app_root))
+os.environ["HTAIL_ACTIVE_APP"] = str(app_root)
+
+from htail_app.app import main
+raise SystemExit(main())
+''',
+        )
         for path in sorted(PACKAGE.rglob("*.py")):
             _write(archive, str(Path("app") / "htail_app" / path.relative_to(PACKAGE)), path.read_bytes())
         _write(
@@ -54,6 +76,7 @@ def build_payload() -> bytes:
             json.dumps(
                 {
                     "format": 3,
+                    "version": version,
                     "platform": "linux-x86_64",
                     "runtime_id": runtime_id(),
                     "supported_cpython_abis": list(SUPPORTED_ABIS),
@@ -95,20 +118,38 @@ def _cache_root():
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "htail"
 
 
+def _valid_app(target):
+    try:
+        manifest = json.loads((target / "bundle.json").read_text(encoding="utf-8"))
+        return (
+            manifest.get("format") == 3
+            and manifest.get("version") == HTAIL_VERSION
+            and manifest.get("runtime_id") == HTAIL_RUNTIME_ID
+            and (target / "launcher.py").is_file()
+            and (target / "app" / "htail_app" / "app.py").is_file()
+        )
+    except Exception:
+        return False
+
+
 def _extract_app(payload):
     root = _cache_root() / HTAIL_VERSION
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"env-{{_PAYLOAD_SHA256[:16]}}"
     if target.is_dir():
-        return target
+        if _valid_app(target):
+            return target
+        shutil.rmtree(target, ignore_errors=True)
     temp = Path(tempfile.mkdtemp(prefix=".env-", dir=str(root)))
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             archive.extractall(temp)
+        if not _valid_app(temp):
+            raise RuntimeError("extracted application manifest does not match wrapper")
         try:
             os.replace(temp, target)
         except OSError:
-            if not target.is_dir():
+            if not _valid_app(target):
                 raise
         return target
     finally:
@@ -195,6 +236,8 @@ def _main():
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(paths)
     env["HTAIL_EXECUTABLE"] = str(Path(sys.argv[0]).resolve())
+    env["HTAIL_WRAPPER_VERSION"] = HTAIL_VERSION
+    env["HTAIL_ACTIVE_APP"] = str(env_dir / "app")
     os.execve(sys.executable, [sys.executable, str(env_dir / "launcher.py"), *sys.argv[1:]], env)
 
 
@@ -208,7 +251,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=ROOT / "dist" / "htail")
     args = parser.parse_args()
     version = read_version()
-    wrapper = build_wrapper(version, build_payload())
+    wrapper = build_wrapper(version, build_payload(version))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(wrapper, encoding="utf-8", newline="\n")
     args.output.chmod(0o755)
