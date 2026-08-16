@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -52,7 +53,6 @@ class MarkdownTableTests(unittest.TestCase):
         self.assertTrue(rendered[1].startswith("├"))
         self.assertTrue(rendered[1].endswith("┤"))
         self.assertIn("longer name", rendered[3])
-        # Right alignment from the Markdown separator keeps the numbers flush.
         count_column = rendered[2].split("│")[-2]
         self.assertTrue(count_column.endswith("12 "))
 
@@ -94,30 +94,33 @@ class GitRemoteFetchEfficiencyTests(unittest.TestCase):
             self.assertEqual(actual_sha, sha)
             self.assertEqual(lines, ["remote one\n"])
 
-    def test_missing_objects_use_depth_one_private_htail_ref(self):
+    def test_missing_objects_use_private_blobless_htail_cache(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             fixture = GitRepoFixture(root)
             consumer = root / "consumer"
+            cache = root / "htail-cache"
             consumer.mkdir()
             git(consumer, "init")
             git(consumer, "remote", "add", "origin", fixture.remote.as_uri())
             context = GitFileContext(consumer, "docs/status.md", ("origin",))
             sha = git(fixture.work, "rev-parse", "HEAD")
 
-            actual_sha, lines = read_remote_snapshot(
-                context,
-                "origin",
-                "main",
-                "utf-8",
-                expected_sha=sha,
-            )
+            with mock.patch.dict(os.environ, {"HTAIL_GIT_CACHE_DIR": str(cache)}):
+                actual_sha, lines = read_remote_snapshot(
+                    context,
+                    "origin",
+                    "main",
+                    "utf-8",
+                    expected_sha=sha,
+                )
             self.assertEqual(actual_sha, sha)
             self.assertEqual(lines, ["remote one\n"])
-            private_refs = git(consumer, "for-each-ref", "--format=%(refname)", "refs/htail/remotes")
-            self.assertIn("/main", private_refs)
-            private_ref = private_refs.splitlines()[0]
-            self.assertEqual(git(consumer, "rev-list", "--count", private_ref), "1")
+            user_refs = git(consumer, "for-each-ref", "--format=%(refname)", "refs/htail")
+            self.assertEqual(user_refs, "")
+            cache_repo = next(cache.glob("*.git"))
+            cached_refs = git(cache_repo, "for-each-ref", "--format=%(refname)", "refs/htail/branches")
+            self.assertIn("refs/htail/branches/", cached_refs)
 
     def test_source_switch_passes_picker_sha_to_follower(self):
         with tempfile.TemporaryDirectory() as td:
