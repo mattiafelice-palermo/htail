@@ -314,8 +314,38 @@ def _grouped_result_rows(
     return out[:rows], tags[:rows]
 
 
+def _expanded_match_span(raw_text: str, result: GlobalSearchMatch) -> Tuple[int, int]:
+    start = len(raw_text[:result.match_start].replace("\t", "    "))
+    end = len(raw_text[:result.match_end].replace("\t", "    "))
+    return start, max(start, end)
+
+
+def preview_text_width(width: int, height: int, line_count: int) -> int:
+    """Return the usable source-text width of the global-search preview pane."""
+    if width < 40 or height < 10:
+        return 0
+    panel_width = min(width - 2, max(72, int(width * 0.92)))
+    panel_width = min(panel_width, width)
+    if panel_width < 96:
+        return 0
+    inner = panel_width - 2
+    left_width = max(40, int((inner - 1) * 0.62))
+    right_width = inner - left_width - 1
+    number_width = len(str(max(1, line_count)))
+    prefix_width = number_width + 5
+    return max(1, right_width - prefix_width)
+
+
 def _preview_rows(
-    panes: Sequence[object], result: Optional[GlobalSearchMatch], rows: int, width: int, color: bool
+    panes: Sequence[object],
+    result: Optional[GlobalSearchMatch],
+    rows: int,
+    width: int,
+    color: bool,
+    *,
+    wrap: bool = False,
+    scroll: int = 0,
+    hscroll: int = 0,
 ) -> List[str]:
     if result is None or result.pane_index >= len(panes):
         return [core.paint("Select a result to preview its context.", core.DIM, color)]
@@ -323,37 +353,101 @@ def _preview_rows(
     lines = pane.snapshot_raw
     if not lines:
         return []
+
     context_rows = max(1, rows - 2)
-    start = max(0, result.source_index - context_rows // 2)
-    start = min(start, max(0, len(lines) - context_rows))
-    out = [core.paint(f"{result.pane_name}:{result.source_index + 1}", core.BOLD_LIGHT_CYAN, color), ""]
-    number_width = len(str(min(len(lines), start + context_rows)))
-    for source_index in range(start, min(len(lines), start + context_rows)):
+    selected_index = min(max(0, result.source_index), len(lines) - 1)
+    anchor_index = min(max(0, selected_index + scroll), len(lines) - 1)
+    source_start = max(0, anchor_index - context_rows)
+    source_end = min(len(lines), anchor_index + context_rows + 1)
+    number_width = len(str(max(1, len(lines))))
+    prefix_width = number_width + 5
+    room = max(1, width - prefix_width)
+
+    selected_raw = lines[selected_index].rstrip("\r\n")
+    selected_text = selected_raw.replace("\t", "    ")
+    match_start, match_end = _expanded_match_span(selected_raw, result)
+    base_left = max(0, min(match_start - room // 3, max(0, len(selected_text) - room)))
+    view_left = max(0, min(base_left + hscroll, max(0, len(selected_text) - room)))
+
+    visual_rows: List[str] = []
+    focus_index: Optional[int] = None
+    for source_index in range(source_start, source_end):
         raw_text = lines[source_index].rstrip("\r\n")
         text = raw_text.replace("\t", "    ")
-        selected = source_index == result.source_index
-        marker = ">" if selected else " "
-        prefix = f"{marker} {source_index + 1:>{number_width}} │ "
-        room = max(1, width - len(prefix))
+        selected = source_index == selected_index
+        first_marker = ">" if selected else " "
+        first_prefix = f"{first_marker} {source_index + 1:>{number_width}} │ "
+        continuation_prefix = f"  {'':>{number_width}} │ "
+
         if selected:
-            match_start = len(raw_text[:result.match_start].replace("\t", "    "))
-            match_end = len(raw_text[:result.match_end].replace("\t", "    "))
-            local_start, local_end = match_start, match_end
-            if len(text) > room:
-                left = max(0, min(match_start - room // 3, len(text) - room))
-                right = min(len(text), left + room)
-                local_start = max(0, match_start - left)
-                local_end = max(local_start, min(right - left, match_end - left))
-                text = text[left:right]
-                if left > 0 and text:
-                    text = "…" + text[1:]
-                if right < len(raw_text.replace("\t", "    ")) and text:
-                    text = text[:-1] + "…"
-            text = _highlight_span(text, local_start, local_end, selected=True, color=color)
-        row = prefix + text
-        if selected and color:
-            row = "\x1b[1;97;48;5;24m" + row + core.RESET
-        out.append(_pad(row, width))
+            local_match_start, local_match_end = _expanded_match_span(raw_text, result)
+        else:
+            local_match_start = local_match_end = 0
+
+        if wrap:
+            chunk_starts = list(range(0, len(text), room)) or [0]
+            focus_segment = 0
+            if source_index == anchor_index and source_index == selected_index and scroll == 0:
+                focus_segment = min(len(chunk_starts) - 1, local_match_start // room)
+            for segment_index, chunk_start in enumerate(chunk_starts):
+                chunk = text[chunk_start:chunk_start + room]
+                if selected:
+                    highlight_start = max(0, local_match_start - chunk_start)
+                    highlight_end = min(len(chunk), local_match_end - chunk_start)
+                    if highlight_end > highlight_start:
+                        chunk = _highlight_span(
+                            chunk,
+                            highlight_start,
+                            highlight_end,
+                            selected=True,
+                            color=color,
+                        )
+                if source_index == anchor_index and segment_index == focus_segment:
+                    focus_index = len(visual_rows)
+                prefix = first_prefix if segment_index == 0 else continuation_prefix
+                row = prefix + chunk
+                if selected and color:
+                    row = "\x1b[1;97;48;5;24m" + row + core.RESET
+                visual_rows.append(_pad(row, width))
+        else:
+            chunk = text[view_left:view_left + room]
+            right = view_left + room
+            hidden_left = view_left > 0
+            hidden_right = right < len(text)
+            if hidden_left and chunk:
+                chunk = "…" + chunk[1:]
+            if hidden_right and chunk:
+                chunk = chunk[:-1] + "…"
+            if selected:
+                highlight_start = max(0, local_match_start - view_left)
+                highlight_end = min(len(chunk), local_match_end - view_left)
+                if hidden_left:
+                    highlight_start = max(1, highlight_start)
+                    highlight_end = max(1, highlight_end)
+                if hidden_right and chunk:
+                    highlight_end = min(len(chunk) - 1, highlight_end)
+                if highlight_end > highlight_start:
+                    chunk = _highlight_span(
+                        chunk,
+                        highlight_start,
+                        highlight_end,
+                        selected=True,
+                        color=color,
+                    )
+            if source_index == anchor_index:
+                focus_index = len(visual_rows)
+            row = first_prefix + chunk
+            if selected and color:
+                row = "\x1b[1;97;48;5;24m" + row + core.RESET
+            visual_rows.append(_pad(row, width))
+
+    if focus_index is None:
+        focus_index = 0
+    top = max(0, focus_index - context_rows // 2)
+    top = min(top, max(0, len(visual_rows) - context_rows))
+    visible = visual_rows[top:top + context_rows]
+    out = [core.paint(f"{result.pane_name}:{result.source_index + 1}", core.BOLD_LIGHT_CYAN, color), ""]
+    out.extend(visible)
     return out[:rows]
 
 
@@ -374,6 +468,9 @@ def render_global_search(
     panes: Sequence[object],
     preview_enabled: bool,
     color: bool,
+    preview_wrap: bool = True,
+    preview_scroll: int = 0,
+    preview_hscroll: int = 0,
     expanded_pane: Optional[int] = None,
     hit_regions: Optional[List[Tuple[int, int, int, int, str, int]]] = None,
 ) -> List[str]:
@@ -407,7 +504,7 @@ def render_global_search(
         filter_row += "    " + core.paint(f"Backend: {fuzzy_backend()}", core.DIM, color)
 
     header_rows = [search_row, mode_row, filter_row]
-    footer_text = "↑↓ match · Shift+↑↓ file · Enter jump · Tab mode · Ctrl+T case · Ctrl+O(letter) sort · Ctrl+F file · Ctrl+P preview · Esc close"
+    footer_text = "↑↓ match · Shift+↑↓ file · Ctrl+↑↓ preview · Ctrl+W wrap · ←→ hscroll · Enter jump · Tab mode · Ctrl+T case · Ctrl+O sort · Ctrl+F file · Ctrl+P preview · Esc close"
 
     show_preview = preview_enabled and panel_width >= 96
     body_height = max(3, panel_height - 8)
@@ -454,10 +551,31 @@ def render_global_search(
                 continue
             kind, value = tag
             hit_regions.append((content_x1, body_y + offset, content_x2, body_y + offset + 1, kind, value))
+        if show_preview:
+            preview_x1 = left_margin + left_width + 2
+            hit_regions.append(
+                (preview_x1, body_y, preview_x1 + right_width, body_y + body_height, "preview", 0)
+            )
 
     if show_preview:
-        right_rows = [core.paint("PREVIEW", core.BOLD_LIGHT_CYAN, color)]
-        right_rows.extend(_preview_rows(panes, selected_result, body_height - 1, right_width, color))
+        preview_state = "WRAP" if preview_wrap else "NOWRAP"
+        if preview_scroll:
+            preview_state += f" · ctx {preview_scroll:+d}"
+        if not preview_wrap and preview_hscroll:
+            preview_state += f" · x {preview_hscroll:+d}"
+        right_rows = [core.paint(f"PREVIEW · {preview_state}", core.BOLD_LIGHT_CYAN, color)]
+        right_rows.extend(
+            _preview_rows(
+                panes,
+                selected_result,
+                body_height - 1,
+                right_width,
+                color,
+                wrap=preview_wrap,
+                scroll=preview_scroll,
+                hscroll=preview_hscroll,
+            )
+        )
         right_rows = right_rows[:body_height] + [""] * max(0, body_height - len(right_rows))
 
     title = " Global search "
