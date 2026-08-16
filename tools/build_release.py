@@ -17,7 +17,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "htail_app"
-RAPIDFUZZ_VERSION = "3.14.5"
+BUNDLE_REQUIREMENTS = ROOT / "tools" / "bundle-requirements.txt"
 SUPPORTED_CPYTHON_ABIS = ("cp310", "cp311", "cp312", "cp313", "cp314")
 WHEEL_PLATFORM = "manylinux_2_28_x86_64"
 _FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
@@ -38,11 +38,9 @@ def _write_deterministic(archive: zipfile.ZipFile, name: str, data: bytes, execu
     archive.writestr(info, data)
 
 
-def _download_rapidfuzz_wheel(abi: str, wheel_dir: Path) -> Path:
-    wheel_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(wheel_dir.glob(f"rapidfuzz-{RAPIDFUZZ_VERSION}-{abi}-{abi}-*.whl"))
-    if existing:
-        return existing[0]
+def _download_wheels(abi: str, root: Path) -> list[Path]:
+    target = root / abi
+    target.mkdir(parents=True, exist_ok=True)
     pyver = abi.removeprefix("cp")
     command = [
         sys.executable,
@@ -50,21 +48,21 @@ def _download_rapidfuzz_wheel(abi: str, wheel_dir: Path) -> Path:
         "pip",
         "download",
         "--disable-pip-version-check",
-        "--no-deps",
         "--only-binary=:all:",
         "--implementation=cp",
         f"--python-version={pyver}",
         f"--abi={abi}",
         f"--platform={WHEEL_PLATFORM}",
         "--dest",
-        str(wheel_dir),
-        f"RapidFuzz=={RAPIDFUZZ_VERSION}",
+        str(target),
+        "--requirement",
+        str(BUNDLE_REQUIREMENTS),
     ]
     subprocess.run(command, check=True)
-    matches = sorted(wheel_dir.glob(f"rapidfuzz-{RAPIDFUZZ_VERSION}-{abi}-{abi}-*.whl"))
-    if not matches:
-        raise SystemExit(f"could not download RapidFuzz wheel for {abi}")
-    return matches[0]
+    wheels = sorted(target.glob("*.whl"))
+    if not wheels:
+        raise SystemExit(f"bundle requirements produced no wheels for {abi}")
+    return wheels
 
 
 def build_payload(include_vendor: bool = True) -> bytes:
@@ -75,30 +73,38 @@ def build_payload(include_vendor: bool = True) -> bytes:
         for path in sorted(PACKAGE.rglob("*.py")):
             _write_deterministic(archive, str(Path("app") / "htail_app" / path.relative_to(PACKAGE)), path.read_bytes())
 
+        requirements_text = BUNDLE_REQUIREMENTS.read_text(encoding="utf-8")
         manifest = {
             "format": 2,
             "platform": "linux-x86_64",
+            "wheel_platform": WHEEL_PLATFORM,
+            "supported_cpython_abis": list(SUPPORTED_CPYTHON_ABIS),
+            "requirements_sha256": hashlib.sha256(requirements_text.encode("utf-8")).hexdigest(),
             "vendor": {},
         }
         if include_vendor:
             with tempfile.TemporaryDirectory(prefix="htail-wheels-") as td:
-                wheel_dir = Path(td)
+                wheel_root = Path(td)
                 for abi in SUPPORTED_CPYTHON_ABIS:
-                    wheel = _download_rapidfuzz_wheel(abi, wheel_dir)
-                    with zipfile.ZipFile(wheel) as package:
-                        for entry in sorted(package.infolist(), key=lambda item: item.filename):
-                            if entry.is_dir():
-                                continue
-                            _write_deterministic(
-                                archive,
-                                str(Path("vendor") / abi / entry.filename),
-                                package.read(entry.filename),
-                                executable=bool((entry.external_attr >> 16) & 0o111),
-                            )
-                    manifest["vendor"][abi] = {
-                        "rapidfuzz": RAPIDFUZZ_VERSION,
-                        "wheel": wheel.name,
-                    }
+                    wheel_names = []
+                    seen_paths = set()
+                    for wheel in _download_wheels(abi, wheel_root):
+                        wheel_names.append(wheel.name)
+                        with zipfile.ZipFile(wheel) as package:
+                            for entry in sorted(package.infolist(), key=lambda item: item.filename):
+                                if entry.is_dir():
+                                    continue
+                                destination = str(Path("vendor") / abi / entry.filename)
+                                if destination in seen_paths:
+                                    raise SystemExit(f"duplicate bundled path for {abi}: {entry.filename}")
+                                seen_paths.add(destination)
+                                _write_deterministic(
+                                    archive,
+                                    destination,
+                                    package.read(entry.filename),
+                                    executable=bool((entry.external_attr >> 16) & 0o111),
+                                )
+                    manifest["vendor"][abi] = {"wheels": wheel_names}
         _write_deterministic(archive, "bundle.json", json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
     return buf.getvalue()
 
@@ -177,7 +183,7 @@ if __name__ == "__main__":
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "dist" / "htail")
-    parser.add_argument("--no-vendor", action="store_true", help="development-only: omit native dependencies")
+    parser.add_argument("--no-vendor", action="store_true", help="development-only: omit bundled runtime dependencies")
     args = parser.parse_args()
     version = read_version()
     wrapper = build_wrapper(version, build_payload(include_vendor=not args.no_vendor))
