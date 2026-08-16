@@ -329,13 +329,27 @@ def _preview_rows(
     out = [core.paint(f"{result.pane_name}:{result.source_index + 1}", core.BOLD_LIGHT_CYAN, color), ""]
     number_width = len(str(min(len(lines), start + context_rows)))
     for source_index in range(start, min(len(lines), start + context_rows)):
-        text = lines[source_index].rstrip("\r\n").replace("\t", "    ")
+        raw_text = lines[source_index].rstrip("\r\n")
+        text = raw_text.replace("\t", "    ")
         selected = source_index == result.source_index
         marker = ">" if selected else " "
         prefix = f"{marker} {source_index + 1:>{number_width}} │ "
         room = max(1, width - len(prefix))
         if selected:
-            text = _highlight_span(text, result.match_start, result.match_end, selected=True, color=color)
+            match_start = len(raw_text[:result.match_start].replace("\t", "    "))
+            match_end = len(raw_text[:result.match_end].replace("\t", "    "))
+            local_start, local_end = match_start, match_end
+            if len(text) > room:
+                left = max(0, min(match_start - room // 3, len(text) - room))
+                right = min(len(text), left + room)
+                local_start = max(0, match_start - left)
+                local_end = max(local_start, min(right - left, match_end - left))
+                text = text[left:right]
+                if left > 0 and text:
+                    text = "…" + text[1:]
+                if right < len(raw_text.replace("\t", "    ")) and text:
+                    text = text[:-1] + "…"
+            text = _highlight_span(text, local_start, local_end, selected=True, color=color)
         row = prefix + text
         if selected and color:
             row = "\x1b[1;97;48;5;24m" + row + core.RESET
