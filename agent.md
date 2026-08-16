@@ -27,6 +27,12 @@ release procedure, and failure handling.
   blobs/tree once through the GitHub connector. Do not create temporary Actions
   workflows, patch-transport commits, or staging files just to move tested code
   to GitHub.
+- When connector transport is required, use the known GitHub primitives
+  directly rather than rediscovering them: `create_blob` for each final changed
+  file, `create_tree` once over the current `main` tree, `create_commit` once,
+  then `create_branch` (new feature branch) or `update_ref` (existing branch).
+  After CI is green, use `update_ref` to fast-forward `main` to that exact
+  commit. Use workflow-run lookup only to verify the branch CI and release run.
 - If CI fails, diagnose the failure, fix it locally, rerun the required local
   gate, then push a replacement feature commit. Do not iterate by using CI as
   the test runner.

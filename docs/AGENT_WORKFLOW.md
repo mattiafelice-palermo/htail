@@ -120,12 +120,46 @@ repository's normal full CI gate before promotion to `main`.
 Implementation should still happen entirely in the local working tree. Once
 the local gate is green, the GitHub connector may be used as the transport:
 
-1. Confirm the current GitHub `main` SHA has not unexpectedly moved.
-2. Create the feature branch from that base.
-3. Upload the final versions of **only the changed files**, preferably as blobs
-   plus one tree and one commit.
-4. Create/update the feature branch to that commit. The branch push is the CI
-   trigger; do not open a PR unless explicitly requested.
+Use these connector primitives directly; they are the standard transport path
+for this repository and should not be rediscovered on every change:
+
+- `create_blob(repository_full_name, content, encoding)` — upload the final
+  content of one changed file and return its Git blob SHA. Independent changed
+  files may be uploaded concurrently when the harness supports parallel calls.
+- `create_tree(repository_full_name, tree_elements, base_tree_sha)` — create
+  one candidate tree using the current `main` tree as the base and replacing
+  only the changed paths with their final blob SHAs.
+- `create_commit(repository_full_name, message, tree_sha, parent_sha)` — create
+  exactly one feature commit whose parent is the `main` SHA used for local
+  validation.
+- `create_branch(repository_full_name, branch_name, sha)` — publish a new
+  feature/hotfix branch at that commit. This branch push triggers CI.
+- `update_ref(repository_full_name, branch_name, sha, force=false)` — move an
+  existing feature branch, or after CI succeeds fast-forward `main` to the exact
+  green commit.
+- Workflow-run lookup (`fetch` on Actions run endpoints, or the loaded
+  workflow-run/job helpers) — confirm the feature-branch CI and, after
+  promotion, the release workflow. Do not repeatedly discover equivalent
+  helpers if one is already loaded.
+
+The mechanical publish sequence is:
+
+1. After the local gate, read the current GitHub `main` SHA and its tree SHA
+   once. It must still be the base used for the candidate.
+2. Upload the final versions of **only the changed files** with `create_blob`.
+   Do not fetch those files back from GitHub merely to reconstruct content that
+   is already authoritative in the local candidate.
+3. Call `create_tree` once, using the current `main` tree as `base_tree_sha`.
+4. Call `create_commit` once with the current `main` SHA as parent.
+5. Call `create_branch` for a new branch, or `update_ref` for an already-created
+   feature branch. Do not create the branch before the final candidate commit
+   exists. This update is the sole CI trigger.
+6. Check CI after a sensible interval based on its normal runtime; do not
+   tight-poll.
+7. If the complete branch gate is green, read `main` **once more immediately
+   before promotion**. If it still equals the original base, call `update_ref`
+   to fast-forward `main` to the exact green feature commit.
+8. For product releases, verify the release workflow and published version.
 
 Sending a final complete file blob is acceptable transport; repeatedly replacing
 whole files through the API while developing is not. Avoid temporary workflow
@@ -134,11 +168,20 @@ there is a demonstrated connector limitation that makes them unavoidable.
 
 For efficient connector use:
 
-- Reuse repository/branch/commit identifiers already established in the
-  session instead of repeatedly rediscovering them.
-- Batch independent reads or writes when the tooling safely supports it.
+- Do not call connector/tool discovery for the primitives listed above once
+  they are available in the session. Invoke them directly.
+- Reuse repository/branch/commit/tree identifiers already established in the
+  session instead of repeatedly looking them up.
+- Upload independent file blobs concurrently when the harness safely supports
+  it; otherwise upload them serially without intermediate verification calls.
 - Prefer one final set of changed-file blobs, one tree, and one commit over a
-  sequence of per-file development commits.
+  sequence of per-file development commits. A returned blob SHA is sufficient;
+  do not fetch the blob back solely to verify transport unless corruption is
+  actually suspected.
+- Do not refetch remote copies of files already present in the final local
+  candidate. The local tested tree is the source of truth for publication.
+- Check `main` at the start of publication and once immediately before
+  promotion, not between every connector operation.
 - Poll CI at a cadence appropriate to its normal runtime rather than in tight
   loops.
 - After promotion, wait for and verify the release workflow when the

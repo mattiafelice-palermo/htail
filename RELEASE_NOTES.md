@@ -1,3 +1,15 @@
+# htail 0.16.12
+
+## New features
+
+- None.
+
+## Bug fixes
+
+- Self-update now uses SHA-256 digests already supplied by the GitHub release API for executable and runtime assets, avoiding redundant checksum-file HTTPS requests on normal GitHub releases.
+- Small GitHub update/checksum requests now use bounded retries with short backoff for transient TLS, timeout, and transport failures instead of failing immediately on a single handshake timeout.
+- Agent workflow guidance now documents the exact GitHub connector primitives and mechanical blob/tree/commit/branch publication sequence so future agents can publish without repeated tool discovery or redundant file fetches.
+
 # htail 0.16.11
 
 ## New features
