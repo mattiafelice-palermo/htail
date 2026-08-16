@@ -59,6 +59,64 @@ def _inject_regex_style(text: str, pattern: Optional[Pattern[str]], on: str, off
     return text
 
 
+def _active_sgr_prefix(text: str, end: int) -> str:
+    """Replay the visible SGR state active immediately before ``end``."""
+    active: List[str] = []
+    for match in core.ANSI_RE.finditer(text[:end]):
+        seq = match.group(0)
+        if not seq.endswith("m"):
+            continue
+        if seq in ("\x1b[0m", "\x1b[m"):
+            active = []
+        else:
+            active.append(seq)
+    return "".join(active)
+
+
+def _inject_selected_regex_style(text: str, pattern: Optional[Pattern[str]]) -> str:
+    """Render selected search spans as guaranteed black-on-bright-yellow.
+
+    Syntax-highlighting SGR inside a match can otherwise turn the foreground
+    white again, which produced low-contrast white/yellow combinations. Strip
+    styling only inside the selected span, then restore the surrounding row's
+    SGR state after it.
+    """
+    if pattern is None:
+        return text
+    plain = core.strip_ansi(text)
+    spans = [(m.start(), m.end()) for m in pattern.finditer(plain) if m.end() > m.start()]
+    if not spans:
+        return text
+
+    boundaries: List[int] = [0] * (len(plain) + 1)
+    raw = visible = 0
+    while raw < len(text) and visible < len(plain):
+        match = core.ANSI_RE.match(text, raw)
+        if match:
+            raw = match.end()
+            continue
+        boundaries[visible] = raw
+        visible += 1
+        raw += 1
+    boundaries[visible] = raw
+
+    selected_on = "\x1b[1;30;103m"
+    for start, end in reversed(spans):
+        raw_start = boundaries[start]
+        raw_end = boundaries[end]
+        restore = _active_sgr_prefix(text, raw_start)
+        selected_plain = core.strip_ansi(text[raw_start:raw_end])
+        text = (
+            text[:raw_start]
+            + selected_on
+            + selected_plain
+            + core.RESET
+            + restore
+            + text[raw_end:]
+        )
+    return text
+
+
 class Pane:
     """Per-file display state, independent of terminal geometry."""
 
@@ -174,14 +232,10 @@ class Pane:
     def _apply_regex_marks(self, row: str, search_index: Optional[int] = None) -> str:
         if not self.color:
             return row
-        # Underline is the persistent user highlight. Non-selected search
-        # matches keep reverse video; the currently selected n/N match gets a
-        # bright-yellow background so it is immediately distinguishable while
-        # preserving the row's existing foreground/syntax colour.
         row = _inject_regex_style(row, self.highlight_regex, "\x1b[4m", "\x1b[24m")
         if self.search_regex is not None:
             if search_index is not None and search_index == self._search_last_target:
-                row = _inject_regex_style(row, self.search_regex, "\x1b[103m", "\x1b[49m")
+                row = _inject_selected_regex_style(row, self.search_regex)
             else:
                 row = _inject_regex_style(row, self.search_regex, "\x1b[7m", "\x1b[27m")
         return row
@@ -211,6 +265,24 @@ class Pane:
 
     def _search_display(self) -> str:
         return search_label(self.search_pattern, self.search_mode)
+
+    def search_state(self) -> Tuple[str, str, Optional[int]]:
+        return self.search_pattern, self.search_mode, self._search_last_target
+
+    def restore_search_state(self, state: Tuple[str, str, Optional[int]], flags: int = 0) -> None:
+        expression, mode, target = state
+        error = self.set_search(expression, flags, mode=mode)
+        if error is None and target is not None and target in self._search_candidates():
+            self._set_search_target(target)
+
+    def search_badge_text(self) -> Optional[str]:
+        if self.search_regex is None:
+            return None
+        if self._search_match_position is not None:
+            return f"MATCH {self._search_match_position}/{self._search_match_total}"
+        if self._search_match_total == 1:
+            return "1 MATCH"
+        return f"{self._search_match_total} MATCHES"
 
     def _search_candidates(self) -> List[int]:
         pattern = self.search_regex
@@ -758,9 +830,6 @@ class Pane:
         else:
             state = "PAUSED" if self.paused else "LIVE"
         parts = [f"{index + 1}:{self.name}", state, self.follow_mode.upper()]
-        if self.search_regex is not None:
-            position = self._search_match_position or 0
-            parts.append(f"MATCH {position}/{self._search_match_total}")
         current = self.current_update_number()
         if current is not None:
             parts.append(f"U{current}")
@@ -792,20 +861,34 @@ class Pane:
         if self.prefer_snapshot and self.snapshot_raw:
             self._ensure_snapshot_layout(inner)
             self._snapshot_top = min(max(0, self._snapshot_top), self._snapshot_max_top(body_h))
-        title = self.title(index, max(1, width - 4), focused, body_h)
-        title_plain = core.strip_ansi(title)
-        title = core.clip_ansi(title, max(1, width - 4))
+        badge_text = self.search_badge_text()
+        badge_plain = f"┤ {badge_text} ├" if badge_text else ""
+        # On very narrow panes, preserve the filename/state title rather than
+        # squeezing both labels into unreadable fragments.
+        if badge_plain and width < len(badge_plain) + 12:
+            badge_plain = ""
+            badge_text = None
+        badge_visible = len(badge_plain)
+        title_room = max(1, width - 4 - badge_visible)
+        title = self.title(index, title_room, focused, body_h)
+        title = core.clip_ansi(title, title_room)
         visible = len(core.strip_ansi(title))
-        # Corners + the leading separator consume three cells. The title
-        # is already clipped to width-4, guaranteeing at least one trailing
-        # dash while keeping the top border exactly `width` cells wide.
-        remaining = max(1, width - 3 - visible)
-        top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + "╮"
+        remaining = max(0, width - 4 - visible - badge_visible)
+        if badge_plain:
+            top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + badge_plain + "─╮"
+        else:
+            top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + "─╮"
         if self.color:
             border_style = core.BOLD_LIGHT_CYAN if focused else core.DIM
-            top = core.paint("╭─", border_style, True) + title + core.paint("─" * remaining + "╮", border_style, True)
+            top = core.paint("╭─", border_style, True) + title + core.paint("─" * remaining, border_style, True)
+            if badge_text is not None:
+                top += core.paint("┤", border_style, True)
+                badge_style = "\x1b[1;30;106m" if focused else core.DIM
+                top += core.paint(f" {badge_text} ", badge_style, True)
+                top += core.paint("├─╮", border_style, True)
+            else:
+                top += core.paint("─╮", border_style, True)
             side = core.paint("│", core.BOLD_LIGHT_CYAN if focused else core.DIM, True)
-            border_style = core.BOLD_LIGHT_CYAN if focused else core.DIM
         else:
             top = top_plain
             side = "│"
