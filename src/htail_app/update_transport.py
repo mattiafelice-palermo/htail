@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Optional
+from typing import Callable, Optional
 
 from . import core
 
@@ -19,9 +19,18 @@ _ORIGINAL_INSTALL = core.UpdateService.install
 _INSTALL_LOCK = threading.Lock()
 
 
-def _open_with_retry(opener, request, *, timeout: float, attempts: int = 3):
+def _open_with_retry(
+    opener,
+    request,
+    *,
+    timeout: float,
+    attempts: int = 3,
+    before_attempt: Optional[Callable[[int, int], None]] = None,
+):
     """Open a request with bounded retries for transient transport failures."""
     for attempt in range(max(1, attempts)):
+        if before_attempt is not None:
+            before_attempt(attempt + 1, max(1, attempts))
         try:
             return opener(request, timeout=timeout)
         except urllib.error.HTTPError:
@@ -44,6 +53,63 @@ def _asset_digest(asset: object) -> Optional[str]:
 def _local_checksum_url(digest: str, filename: str) -> str:
     payload = urllib.parse.quote(f"{digest}  {filename}\n", safe="")
     return f"data:text/plain;charset=utf-8,{payload}"
+
+
+def _request_url(request: object) -> str:
+    if isinstance(request, urllib.request.Request):
+        return str(request.full_url)
+    return str(request)
+
+
+def _connection_stage(release: core.ReleaseInfo, request: object) -> Optional[str]:
+    """Describe real network opens using stages the existing UI already maps."""
+    url = _request_url(request)
+    if not url.startswith(("https://", "http://")):
+        return None
+    if release.runtime_checksum_url and url == release.runtime_checksum_url:
+        return "Verifying runtime SHA-256 checksum · connecting…"
+    if release.checksum_url and url == release.checksum_url:
+        return "Verifying release SHA-256 checksum · connecting…"
+    if release.runtime_url and url == release.runtime_url:
+        return "Downloading runtime · connecting…"
+    if url == release.asset_url:
+        return "Downloading release · connecting…"
+    return "Preparing network request…"
+
+
+def _progress_owner(progress):
+    """Return the interactive MultiApp captured by its nested progress callback."""
+    if progress is None or not hasattr(progress, "__code__"):
+        return None
+    closure = getattr(progress, "__closure__", None) or ()
+    for name, cell in zip(progress.__code__.co_freevars, closure):
+        if name != "self":
+            continue
+        try:
+            owner = cell.cell_contents
+        except ValueError:
+            return None
+        if hasattr(owner, "update_overall_progress") and hasattr(owner, "render_frames"):
+            return owner
+    return None
+
+
+def _show_completion_before_return(progress, *, timeout: float = 0.20) -> bool:
+    """Render the interactive 100% state once before restart can be scheduled."""
+    owner = _progress_owner(progress)
+    if owner is None:
+        return False
+    start_frames = int(getattr(owner, "render_frames", 0))
+    owner.update_install_status = "Update complete — restarting…"
+    owner.update_install_progress = None
+    owner.update_overall_progress = 1.0
+    owner.dirty = True
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if int(getattr(owner, "render_frames", start_frames)) > start_frames:
+            return True
+        time.sleep(0.005)
+    return int(getattr(owner, "render_frames", start_frames)) > start_frames
 
 
 def _check_latest(self: core.UpdateService) -> Optional[core.ReleaseInfo]:
@@ -125,16 +191,32 @@ def _check_latest(self: core.UpdateService) -> Optional[core.ReleaseInfo]:
 
 
 def _install(self: core.UpdateService, release: core.ReleaseInfo, target, progress=None):
-    """Run the frozen installer with retrying URL opens for transient failures."""
+    """Run the frozen installer with retrying URL opens and visible connection stages."""
     with _INSTALL_LOCK:
         opener = core.urllib.request.urlopen
 
         def retrying_urlopen(request, timeout=None):
-            return _open_with_retry(opener, request, timeout=float(timeout or 10.0))
+            stage = _connection_stage(release, request)
+
+            def before_attempt(attempt: int, attempts: int) -> None:
+                if progress is None or stage is None:
+                    return
+                suffix = "" if attempt == 1 else f" (retry {attempt}/{attempts})"
+                progress(stage + suffix, None, None)
+
+            return _open_with_retry(
+                opener,
+                request,
+                timeout=float(timeout or 10.0),
+                before_attempt=before_attempt,
+            )
 
         core.urllib.request.urlopen = retrying_urlopen
         try:
-            return _ORIGINAL_INSTALL(self, release, target, progress=progress)
+            result = _ORIGINAL_INSTALL(self, release, target, progress=progress)
+            if result[0]:
+                _show_completion_before_return(progress)
+            return result
         finally:
             core.urllib.request.urlopen = opener
 
