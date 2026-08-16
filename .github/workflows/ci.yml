@@ -18,7 +18,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13"
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check RapidFuzz==3.14.5
       - name: Compile source
         run: python -m compileall -q src tools tests benchmarks
       - name: Run tests
@@ -39,3 +41,4 @@ jobs:
           expected="$(python -c 'from htail_app import VERSION; print(f"htail {VERSION}")')"
           echo "$actual"
           test "$actual" = "$expected"
+          python /tmp/htail --bundle-self-test

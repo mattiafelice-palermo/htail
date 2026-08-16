@@ -1,18 +1,18 @@
-# htail 0.15.0
+# htail 0.16.0
 
 ## New features
 
-- Added a searchable `:` command palette with a Markdown heading outline, pane switching and configuration actions.
-- Added Boolean search (`AND`, `OR`, `NOT`, parentheses and quoted phrases) as a third search mode alongside Simple and Regex.
-- Added `*` search-selected/current-word behavior.
-- Added per-pane line numbers and wrap-off mode with horizontal `←` / `→` scrolling.
-- Added rolling line/byte rate meters and configurable expected-heartbeat alerts (`--heartbeat 5m`).
-- Added direct static viewing of `.gz`, `.bz2`, `.xz` and `.lzma` files.
-- Added first-class OpenSSH remote-tail sources via `--ssh user@host:/path` or `--ssh ssh://host/path`.
-- `--exec` and SSH source panes now expose process PID, runtime and exit status in their lifecycle state.
-- HTTP(S) URLs are emitted as OSC-8 hyperlinks for terminals that support clickable links.
+- Redesigned global search as a structured two-pane TUI: search controls and ranked/grouped results on the left, source context preview on the right. Narrow terminals automatically drop the preview rather than squeezing both panes.
+- Added **Fuzzy** as a fourth global-search mode alongside Simple, Regex and Boolean.
+- Fuzzy results use bundled RapidFuzz C++ scoring and default to a flat global **Relevance** ranking across all files.
+- Fuzzy search can switch to **File** organization; file groups are ordered by their best score and the selected file expands while the others stay compact.
+- Added interactive global-search controls for Case/NoCase (`Ctrl+T`), Relevance/File ordering (`Ctrl+O`), file filtering (`Ctrl+F`) and preview visibility (`Ctrl+P`).
+- Global search now caches its candidate corpus and search state so unchanged files are not rebuilt on every redraw.
 
-## Notes
+## Distribution
 
-- Compressed inputs are intentionally static snapshots; they are not re-read when the compressed file changes.
-- SSH transport/authentication uses the installed `ssh` command and therefore respects the user's normal OpenSSH configuration.
+- Replaced the release zipapp payload with an extracted, hash-addressed application environment under the htail cache. Native Python extensions can now be bundled and imported normally.
+- Added a generic `tools/bundle-requirements.txt` dependency manifest. The release builder resolves wheel dependencies for CPython 3.10–3.14 and embeds a matching vendor directory for each ABI.
+- RapidFuzz 3.14.5 is the first bundled native dependency. The same mechanism can support future dependencies such as NumPy without another packaging redesign.
+- Published release bundles currently target Linux x86-64 and continue to use the system Python interpreter.
+- The repository-level `./htail` is now a lightweight source-checkout launcher; release assets remain the self-contained install/update artifact.
