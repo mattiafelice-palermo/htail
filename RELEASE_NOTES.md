@@ -1,13 +1,12 @@
-# htail 0.12.0
+# htail 0.13.0
 
 ## New features
 
-- Added per-pane **CHANGES / TAIL** follow modes. CHANGES remains the default and opens new updates at their first changed/new line; TAIL stays pinned to EOF for continuously growing program output.
-- Press `t` to toggle the focused pane's follow mode. Manual upward navigation suspends TAIL auto-follow; `f`, `End`, or returning to EOF resumes it.
-- Local Simple and Regex searches now show the selected `n` / `N` match with a distinct bright-yellow background, while other matches retain reverse-video highlighting.
-- Pane titles now show persistent `MATCH x/y` search position and the active follow mode.
+- Local `/` search now uses an inline field attached to the bottom of the focused pane instead of a modal, keeping file content visible while searching.
+- Simple and Regex matches highlight live as the query is typed; `Tab` switches mode, `Enter` commits, and `Esc` restores the previous search.
+- Match progress now appears as a dedicated high-contrast badge on the pane's top-right border instead of competing with filename/follow/scroll state in the left title.
 
 ## Bug fixes
 
-- Initial file viewing now remains bottom-aligned across startup terminal/layout geometry changes instead of consuming the EOF-position request after the first render and sometimes falling back to the top with `↓N more`.
-- Search selection styling is repainted when moving between matches, so the active result never remains visually ambiguous.
+- Selected `n` / `N` matches now use guaranteed black-on-bright-yellow rendering so syntax-highlighted white text cannot produce an unreadable white/yellow combination.
+- Inline search reserves a real pane row, so opening the editor does not cover the final content line or invalidate EOF/scroll indicators.
