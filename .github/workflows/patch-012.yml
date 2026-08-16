@@ -6,6 +6,7 @@ on:
       - feature/follow-modes-search-selection-0.12.0
     paths:
       - .github/patch_012.py
+      - .github/patch_012_fix.py
       - .github/workflows/patch-012.yml
 
 permissions:
@@ -23,7 +24,7 @@ jobs:
         with:
           python-version: "3.x"
       - name: Apply patch
-        run: python .github/patch_012.py
+        run: python .github/patch_012_fix.py
       - name: Compile
         run: python -m compileall -q src tools tests benchmarks
       - name: Run tests
