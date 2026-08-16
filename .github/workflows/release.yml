@@ -88,12 +88,30 @@ jobs:
 
       - name: Prepare release assets
         if: steps.existing.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           chmod +x dist/htail
           sha256sum dist/htail > dist/htail.sha256
           for runtime in dist/htail-runtime-*.zip; do
             sha256sum "$runtime" > "$runtime.sha256"
           done
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+
+          version = os.environ["VERSION"]
+          notes = Path("RELEASE_NOTES.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"(?ms)^# htail {re.escape(version)}[ \t]*$.*?(?=^# htail \S+[ \t]*$|\Z)",
+              notes,
+          )
+          if match is None:
+              raise SystemExit(f"release notes for htail {version} were not found")
+          current = re.sub(r"(?mi)^[-*+]\s+None\.\s*$\n?", "", match.group(0)).strip() + "\n"
+          Path("dist/release-notes.md").write_text(current, encoding="utf-8")
+          PY
 
       - name: Create GitHub Release
         if: steps.existing.outputs.exists != 'true'
@@ -105,6 +123,6 @@ jobs:
           gh release create "$TAG" \
             --target "$(git rev-parse HEAD)" \
             --title "$TAG" \
-            --notes-file RELEASE_NOTES.md \
+            --notes-file dist/release-notes.md \
             dist/htail dist/htail.sha256 \
             dist/htail-runtime-*.zip dist/htail-runtime-*.zip.sha256

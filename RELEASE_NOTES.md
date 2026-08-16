@@ -1,3 +1,16 @@
+# htail 0.16.14
+
+## New features
+
+- Local Git files now begin remote-source discovery in the background as soon as they are opened, so the source picker can use already-prepared branch metadata instead of starting network work on demand.
+- The source picker now filters filter-capable remotes to branches where the currently viewed repository-relative file actually exists, ranks the remote branch matching the local branch first, and marks it with `★` as the recommended choice.
+- htail now warms the recommended remote branch's file blob in the background; after discovery finishes, switching to that branch normally requires no network work at selection time.
+
+## Bug fixes
+
+- Update release notes are now scoped to the current htail release and empty-section placeholders are suppressed in the update modal.
+- GitHub releases now publish only the current version's release-note block, with empty-section placeholders removed, instead of attaching the complete historical `RELEASE_NOTES.md` file.
+
 # htail 0.16.13
 
 ## New features
