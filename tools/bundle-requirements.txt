@@ -1,0 +1,4 @@
+# Dependencies embedded into each supported CPython ABI vendor directory.
+# Add future binary or pure-Python runtime dependencies here; build_release.py
+# resolves and bundles their wheel dependencies for every supported ABI.
+RapidFuzz==3.14.5
