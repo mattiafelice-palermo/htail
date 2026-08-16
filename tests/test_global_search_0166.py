@@ -44,7 +44,8 @@ class GlobalSearch0166PreviewTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("reviewer", "\n".join(rows))
+        right_cells = [parts[-2] for row in rows if len(parts := row.split("│")) >= 4]
+        self.assertTrue(any("reviewer" in cell for cell in right_cells))
 
     def test_tab_expansion_keeps_highlight_aligned(self):
         text = "prefix\t" + ("context " * 6) + "reviewer tail"
