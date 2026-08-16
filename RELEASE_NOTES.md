@@ -1,3 +1,14 @@
+# htail 0.16.5
+
+## Fuzzy search relevance
+
+- Fuzzy global search now scores the best substring alignment in each line instead of using whole-line `WRatio`, so an exact query occurrence scores 100 regardless of surrounding line length.
+- Fuzzy match highlighting now uses RapidFuzz's winning partial-ratio alignment, keeping the highlighted fragment consistent with the score.
+
+## Regression coverage
+
+- Added coverage for a long line containing an exact `reviewer` occurrence outranking a shorter approximate `review` match, including case-insensitive alignment.
+
 # htail 0.16.4
 
 ## Global search UX
