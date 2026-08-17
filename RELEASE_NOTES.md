@@ -1,3 +1,13 @@
+# htail 0.16.19
+
+## New features
+
+- None.
+
+## Bug fixes
+
+- Tab characters in watched files are now expanded to pane-local 8-column stops before wrapping, horizontal slicing, clipping, and padding, so tab-separated content can no longer push or wrap the right pane border out of alignment.
+
 # htail 0.16.18
 
 ## New features
