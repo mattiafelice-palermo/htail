@@ -163,7 +163,14 @@ def _runtime_target(abi):
 
 def _legacy_runtime(abi):
     for candidate in sorted((_cache_root() / "0.16.0").glob(f"env-*/vendor/{{abi}}"), reverse=True):
-        if candidate.is_dir() and (candidate / "rapidfuzz").is_dir():
+        # A legacy runtime is reusable only if it satisfies the current
+        # bundled dependency contract. Older 0.16.0 caches carried RapidFuzz
+        # alone and must not suppress downloading the Pygments-enabled runtime.
+        if (
+            candidate.is_dir()
+            and (candidate / "rapidfuzz").is_dir()
+            and (candidate / "pygments").is_dir()
+        ):
             return candidate
     return None
 

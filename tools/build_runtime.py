@@ -90,7 +90,7 @@ def self_test(path: Path) -> None:
             env = dict(os.environ)
             env["PYTHONPATH"] = str(target)
             subprocess.run(
-                [sys.executable, "-c", "import rapidfuzz; print(rapidfuzz.__version__)"],
+                [sys.executable, "-c", "import rapidfuzz, pygments; from pygments.lexers import get_lexer_for_filename; get_lexer_for_filename('demo.py'); get_lexer_for_filename('demo.sh'); print(rapidfuzz.__version__, pygments.__version__)"],
                 check=True,
                 env=env,
             )

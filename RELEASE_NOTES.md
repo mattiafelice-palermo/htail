@@ -1,3 +1,16 @@
+# htail 0.16.18
+
+## New features
+
+- Pygments 2.20.0 is now bundled in every htail runtime, so automatic syntax highlighting works immediately for Python, shell scripts, Dockerfiles, and the full set of filename patterns recognized by Pygments without a separate installation step.
+- Syntax highlighting now supports persistent `--theme` selection with curated Pygments terminal themes including Monokai, Dracula, GitHub Dark, Gruvbox Dark, Nord, One Dark, Solarized, Material, Vim, Zenburn, and light variants. An explicit theme choice is saved for later runs.
+- Page Up / Page Down viewport navigation is covered explicitly by regression tests: each key scrolls the focused file by one viewport page while remaining independent from held-arrow acceleration.
+
+## Bug fixes
+
+- Declining or failing the optional Pygments installation prompt is now remembered, so source-checkout users are not asked again on every launch. Normal release installs no longer need the prompt because Pygments ships in the runtime.
+- Runtime bootstrap no longer reuses an older RapidFuzz-only legacy cache when the current bundled dependency set also requires Pygments; it downloads the current runtime instead.
+
 # htail 0.16.17
 
 ## New features
