@@ -61,21 +61,20 @@ jobs:
       - name: Smoke test native runtime asset
         run: python tools/build_runtime.py --self-test dist/htail-runtime-cp313.zip
 
-      - name: Check existing release
+      - name: Check existing published tag
         id: existing
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         shell: bash
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Require version bump when product source changed
-        if: steps.existing.outputs.exists == 'true'
+        if: steps.existing.outputs.published == 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
         shell: bash
@@ -87,7 +86,7 @@ jobs:
           fi
 
       - name: Prepare release assets
-        if: steps.existing.outputs.exists != 'true'
+        if: steps.existing.outputs.published != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -113,16 +112,77 @@ jobs:
           Path("dist/release-notes.md").write_text(current, encoding="utf-8")
           PY
 
-      - name: Create GitHub Release
-        if: steps.existing.outputs.exists != 'true'
+      - name: Publish GitHub Release
+        if: steps.existing.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         shell: bash
         run: |
-          gh release create "$TAG" \
-            --target "$(git rev-parse HEAD)" \
-            --title "$TAG" \
-            --notes-file dist/release-notes.md \
-            dist/htail dist/htail.sha256 \
-            dist/htail-runtime-*.zip dist/htail-runtime-*.zip.sha256
+          target="$(git rev-parse HEAD)"
+          assets=(
+            dist/htail
+            dist/htail.sha256
+            dist/htail-runtime-*.zip
+            dist/htail-runtime-*.zip.sha256
+          )
+
+          retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then
+                return 0
+              fi
+              if (( attempt < 5 )); then
+                sleep $((attempt * 5))
+              fi
+            done
+            return 1
+          }
+
+          resume_draft() {
+            local state
+            if ! state="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+              return 1
+            fi
+            if [[ "$state" != "true" ]]; then
+              return 1
+            fi
+
+            echo "Found interrupted draft for $TAG; resuming it."
+            retry gh release upload "$TAG" "${assets[@]}" --clobber
+            retry gh release edit "$TAG" \
+              --target "$target" \
+              --title "$TAG" \
+              --notes-file dist/release-notes.md \
+              --draft=false
+          }
+
+          # A transient 5xx from `gh release create` can leave a fully or
+          # partially populated draft behind. Resume that draft instead of
+          # treating its tag name as a published Git tag.
+          if resume_draft; then
+            exit 0
+          fi
+
+          for attempt in 1 2 3 4 5; do
+            if gh release create "$TAG" \
+              --target "$target" \
+              --title "$TAG" \
+              --notes-file dist/release-notes.md \
+              "${assets[@]}"; then
+              exit 0
+            fi
+
+            # The failed request may nevertheless have created a draft.
+            if resume_draft; then
+              exit 0
+            fi
+
+            if (( attempt < 5 )); then
+              sleep $((attempt * 5))
+            fi
+          done
+
+          echo "Unable to publish $TAG after 5 attempts." >&2
+          exit 1
