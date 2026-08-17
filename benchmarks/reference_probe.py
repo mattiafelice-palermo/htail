@@ -105,6 +105,19 @@ def main() -> int:
     from htail_app.pane import Pane
     from htail_app.watcher import FileFollower, WatchUpdate, analyze_changes
 
+    # Newer releases may add optional pane chrome that intentionally changes
+    # terminal geometry (for example a dedicated scrollbar rail). The frozen
+    # reference probe compares invariant content/render behavior, so disable
+    # such optional chrome when the candidate exposes a switch for it. Older
+    # reference tags do not have ui_features and simply keep their original
+    # renderer.
+    try:
+        from htail_app.ui_features import _apply_scrollbar_style
+    except ImportError:
+        pass
+    else:
+        _apply_scrollbar_style("off", persist=False)
+
     behavior = {}
     diff_cases = [
         (["a\n"], ["a\n", "b\n"]),
