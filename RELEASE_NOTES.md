@@ -1,3 +1,16 @@
+# htail 0.17.1
+
+## New features
+
+- Scrollbars now support four persistent styles selectable from the command palette: the new separated `Rail` style, the previous right-border `Border` thumb, a compact `Minimal` marker, and `Off`. `Rail` is the new default and keeps the scrollbar parallel to, but visually separated from, the pane border.
+
+## Bug fixes
+
+- Scrollbar accent color is now reserved for the focused pane; inactive panes keep only neutral/dim scrollbar chrome.
+- `Alt+Arrow` pane focus changes now use scoped old/new-pane terminal damage plus footer-only refreshes, avoiding the full-row clear/repaint path that could visibly blink in multi-pane layouts.
+- The UI palette manager now handles coalesced/repeated arrow and page-key input itself, so navigation and editing remain responsive; `Esc` and `q` also provide reliable exits from palette list/editor modes.
+- Double-click selection now supports held-button drag motion. The selection visibly expands inside the originating pane and the final selected range is copied through OSC 52 on release.
+
 # htail 0.17.0
 
 ## New features

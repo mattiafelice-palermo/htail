@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from copy import deepcopy
+from dataclasses import dataclass
 import re
 import sys
 import time
@@ -17,6 +18,24 @@ from . import pane as pane_module
 DOUBLE_CLICK_SECONDS = 0.42
 UI_PALETTE_STATE_KEY = "ui_palette"
 UI_PALETTES_STATE_KEY = "ui_palettes"
+SCROLLBAR_STYLE_STATE_KEY = "scrollbar_style"
+SCROLLBAR_STYLES = ("rail", "border", "minimal", "off")
+SCROLLBAR_LABELS = {
+    "rail": "Rail",
+    "border": "Border",
+    "minimal": "Minimal",
+    "off": "Off",
+}
+
+
+@dataclass(frozen=True)
+class MouseSelection:
+    mode: str
+    start_visual: int
+    start_col: int
+    end_visual: int
+    end_col: int
+    text: str
 
 # Values are ANSI 256-colour indexes. Built-ins are immutable in the editor.
 BUILTIN_PALETTES: Dict[str, Dict[str, int]] = {
@@ -90,6 +109,7 @@ PALETTE_FIELDS: Tuple[Tuple[str, str], ...] = (
 
 _ACTIVE_UI_PALETTE_NAME = "default"
 _ACTIVE_UI_PALETTE = deepcopy(BUILTIN_PALETTES["default"])
+_ACTIVE_SCROLLBAR_STYLE = "rail"
 _ORIGINAL_PAINT = core.paint
 _ORIGINAL_REVERSE = core.REVERSE
 _ORIGINAL_SELECTED_SEARCH_STYLE = pane_module.SELECTED_SEARCH_STYLE
@@ -169,6 +189,30 @@ def current_palette_name() -> str:
 
 def current_palette() -> Dict[str, int]:
     return dict(_ACTIVE_UI_PALETTE)
+
+
+def current_scrollbar_style() -> str:
+    return _ACTIVE_SCROLLBAR_STYLE
+
+
+def _apply_scrollbar_style(name: str, *, persist: bool) -> str:
+    global _ACTIVE_SCROLLBAR_STYLE
+    candidate = name if name in SCROLLBAR_STYLES else "rail"
+    _ACTIVE_SCROLLBAR_STYLE = candidate
+    if persist:
+        state = _load_state()
+        state[SCROLLBAR_STYLE_STATE_KEY] = candidate
+        _save_state(state)
+    return candidate
+
+
+def _load_scrollbar_style() -> None:
+    requested = str(_load_state().get(SCROLLBAR_STYLE_STATE_KEY, "rail")).strip().lower()
+    _apply_scrollbar_style(requested, persist=False)
+
+
+def _scrollbar_gutter_width(style: Optional[str] = None) -> int:
+    return 2 if (style or current_scrollbar_style()) in {"rail", "minimal"} else 0
 
 
 def _fg(index: int, *, bold: bool = False, dim: bool = False) -> str:
@@ -306,6 +350,45 @@ def _style_visible_span(text: str, start: int, end: int, style: str) -> str:
     return text[:raw_start] + style + selected + core.RESET + restore + text[raw_end:]
 
 
+def _insert_before_last_visible(text: str, insertion: str) -> str:
+    plain, boundaries = _visible_boundaries(text)
+    if not plain:
+        return text + insertion
+    raw = boundaries[len(plain) - 1]
+    return text[:raw] + insertion + text[raw:]
+
+
+def _selection_bounds(selection: MouseSelection) -> Tuple[int, int, int, int]:
+    start = (selection.start_visual, selection.start_col)
+    end = (selection.end_visual, selection.end_col)
+    if start <= end:
+        return selection.start_visual, selection.start_col, selection.end_visual, selection.end_col
+    return selection.end_visual, selection.end_col, selection.start_visual, selection.start_col
+
+
+def _selection_text(
+    visual_rows,
+    start_visual: int,
+    start_col: int,
+    end_visual: int,
+    end_col: int,
+) -> str:
+    if (start_visual, start_col) > (end_visual, end_col):
+        start_visual, end_visual = end_visual, start_visual
+        start_col, end_col = end_col, start_col
+    pieces: List[str] = []
+    for visual_index in range(start_visual, end_visual + 1):
+        if visual_index < 0 or visual_index >= len(visual_rows):
+            continue
+        plain = core.strip_ansi(visual_rows[visual_index])
+        left = start_col if visual_index == start_visual else 0
+        right = end_col if visual_index == end_visual else len(plain)
+        left = max(0, min(len(plain), left))
+        right = max(left, min(len(plain), right))
+        pieces.append(plain[left:right])
+    return "\n".join(pieces)
+
+
 def _scrollbar_geometry(total: int, viewport: int, top: int, track: int) -> Tuple[int, int]:
     track = max(0, track)
     if track <= 0:
@@ -355,41 +438,95 @@ def _install_pane_chrome() -> None:
         self._mouse_selection = None
 
     def render_box(self, width: int, height: int, focused: bool, index: int):
-        rows = list(original_render_box(self, width, height, focused, index))
-        if width < 4 or height < 3 or len(rows) < 3:
+        style = current_scrollbar_style()
+        gutter = _scrollbar_gutter_width(style) if width >= 8 else 0
+        base_width = max(4, width - gutter)
+        rows = list(original_render_box(self, base_width, height, focused, index))
+        if base_width < 4 or height < 3 or len(rows) < 3:
             return rows
 
         body_h = min(max(0, height - 2), max(0, len(rows) - 2))
         total, top = _pane_view_state(self, body_h)
         thumb_start, thumb_len = _scrollbar_geometry(total, body_h, top, body_h)
-        if thumb_len and bool(getattr(self, "color", False)):
-            thumb_style = _fg(_ACTIVE_UI_PALETTE["scrollbar"], bold=focused)
+
+        if gutter:
+            # The new default keeps the pane border visually independent from
+            # the scrollbar: [content][bar][space][border].
+            rows[0] = _insert_before_last_visible(rows[0], "─" * gutter)
+            rows[-1] = _insert_before_last_visible(rows[-1], "─" * gutter)
             for local in range(body_h):
                 row_index = 1 + local
                 if row_index >= len(rows) - 1:
                     break
-                if thumb_start <= local < thumb_start + thumb_len:
-                    rows[row_index] = _replace_visible_cell(
-                        rows[row_index],
-                        -1,
-                        core.paint("┃", thumb_style, True),
+                thumb = bool(thumb_len and thumb_start <= local < thumb_start + thumb_len)
+                if style == "rail":
+                    glyph = "█" if thumb else "│"
+                else:  # minimal
+                    glyph = "▐" if thumb else " "
+                if bool(getattr(self, "color", False)) and thumb and focused:
+                    bar = core.paint(glyph, _fg(_ACTIVE_UI_PALETTE["scrollbar"], bold=True), True)
+                elif bool(getattr(self, "color", False)):
+                    # Inactive panes deliberately carry no palette foreground
+                    # colour on their scrollbar; only the focused thumb is accented.
+                    bar = _ORIGINAL_PAINT(glyph, "\x1b[2m", True)
+                else:
+                    bar = glyph
+                plain, boundaries = _visible_boundaries(rows[row_index])
+                if not plain:
+                    continue
+                raw = boundaries[len(plain) - 1]
+                restore = pane_module._active_sgr_prefix(rows[row_index], raw)
+                rows[row_index] = (
+                    rows[row_index][:raw]
+                    + core.RESET
+                    + bar
+                    + core.RESET
+                    + " "
+                    + restore
+                    + rows[row_index][raw:]
+                )
+        elif style == "border" and thumb_len:
+            for local in range(body_h):
+                if not (thumb_start <= local < thumb_start + thumb_len):
+                    continue
+                row_index = 1 + local
+                if row_index >= len(rows) - 1:
+                    break
+                replacement = "┃"
+                if bool(getattr(self, "color", False)) and focused:
+                    replacement = core.paint(
+                        "┃", _fg(_ACTIVE_UI_PALETTE["scrollbar"], bold=True), True
                     )
+                rows[row_index] = _replace_visible_cell(rows[row_index], -1, replacement)
 
         selection = getattr(self, "_mouse_selection", None)
-        if selection is not None and bool(getattr(self, "color", False)):
-            mode, visual_index, start, end, _text = selection
+        if isinstance(selection, MouseSelection) and bool(getattr(self, "color", False)):
             snapshot = bool(getattr(self, "prefer_snapshot", False) and getattr(self, "snapshot_raw", None))
             current_mode = "snapshot" if snapshot else "history"
             current_top = int(getattr(self, "_snapshot_top", 0) if snapshot else getattr(self, "top", 0))
-            if mode == current_mode and current_top <= visual_index < current_top + body_h:
-                local = visual_index - current_top
-                row_index = 1 + local
-                if 0 <= row_index < len(rows) - 1:
-                    viewport_start = _pane_selection_visible_start(self)
-                    visible_start = max(0, start - viewport_start)
-                    visible_end = min(max(0, width - 2), end - viewport_start)
+            visual_rows = (
+                getattr(self, "_snapshot_visual_lines", ())
+                if snapshot
+                else getattr(self, "_visual_lines", ())
+            )
+            if selection.mode == current_mode:
+                start_visual, start_col, end_visual, end_col = _selection_bounds(selection)
+                viewport_start = _pane_selection_visible_start(self)
+                content_width = max(0, base_width - 2)
+                for visual_index in range(
+                    max(start_visual, current_top),
+                    min(end_visual, current_top + body_h - 1) + 1,
+                ):
+                    local = visual_index - current_top
+                    row_index = 1 + local
+                    if not (0 <= row_index < len(rows) - 1) or not (0 <= visual_index < len(visual_rows)):
+                        continue
+                    plain_source = core.strip_ansi(visual_rows[visual_index])
+                    row_start = start_col if visual_index == start_visual else 0
+                    row_end = end_col if visual_index == end_visual else len(plain_source)
+                    visible_start = max(0, row_start - viewport_start)
+                    visible_end = min(content_width, row_end - viewport_start)
                     if visible_end > visible_start:
-                        # +1 accounts for the left pane border.
                         rows[row_index] = _style_visible_span(
                             rows[row_index],
                             1 + visible_start,
@@ -539,6 +676,7 @@ def _install_app_features() -> None:
         self._last_left_click_time = 0.0
         self._last_left_click_target = None
         self._last_left_click_xy = None
+        self._mouse_drag_selection = None
         self._ui_theme_field = 0
         self._ui_theme_draft = None
         self._ui_theme_draft_name = None
@@ -559,6 +697,12 @@ def _install_app_features() -> None:
         items = list(original_palette_all_items(self))
         if self.palette_mode == "commands":
             items.append(app_module.PaletteItem("UI themes / palette editor…", "ui-themes", detail="apply / create / edit / delete"))
+            style = current_scrollbar_style()
+            items.append(app_module.PaletteItem(
+                f"Scrollbar style: {SCROLLBAR_LABELS[style]}",
+                "scrollbar-style",
+                detail="Enter cycles Rail / Border / Minimal / Off",
+            ))
             if self.layout != "stream" and self.panes:
                 items.append(app_module.PaletteItem("Close focused pane", "close-pane", detail="Ctrl+W"))
         return items
@@ -665,8 +809,15 @@ def _install_app_features() -> None:
         target = _directional_neighbor(rects, self.focus, direction)
         if target is None or target == self.focus:
             return False
+        previous = self.focus
         self.focus = target
-        self.dirty = True
+        marker = getattr(self, "_mark_panes_dirty", None)
+        if callable(marker):
+            marker((previous, target))
+        else:
+            self.dirty = True
+        if hasattr(self, "_terminal_scroll_hint"):
+            self._terminal_scroll_hint = None
         return True
 
     def _clear_other_selections(self, target) -> None:
@@ -674,17 +825,22 @@ def _install_app_features() -> None:
             if pane is not target and hasattr(pane, "clear_mouse_selection"):
                 pane.clear_mouse_selection()
 
-    def _select_mouse_word(self, event, target_index: int, pane, rect) -> bool:
+    def _mouse_point(self, event, target_index: int, pane, rect, *, clamp: bool = False):
         focused = target_index == self.focus if target_index >= 0 else True
-        inline_search = self.prompt_mode == "search" and focused and rect.height >= 4
-        match_status = pane.search_regex is not None and rect.height >= (5 if inline_search else 4)
+        inline_search = getattr(self, "prompt_mode", None) == "search" and focused and rect.height >= 4
+        match_status = getattr(pane, "search_regex", None) is not None and rect.height >= (5 if inline_search else 4)
         reserve = (1 if inline_search else 0) + (1 if match_status else 0)
         render_height = rect.height - reserve
         body_h = max(0, render_height - 2)
         local_y = event.y - rect.y - 1 - (1 if match_status else 0)
+        if clamp and body_h:
+            local_y = min(max(0, local_y), body_h - 1)
         if local_y < 0 or local_y >= body_h:
-            return False
-        inner_w = max(1, rect.width - 2)
+            return None
+
+        style = current_scrollbar_style()
+        gutter = _scrollbar_gutter_width(style) if rect.width >= 8 else 0
+        inner_w = max(1, rect.width - 2 - gutter)
         snapshot = bool(pane.prefer_snapshot and pane.snapshot_raw)
         if snapshot:
             pane._ensure_snapshot_layout(inner_w)
@@ -697,31 +853,137 @@ def _install_app_features() -> None:
             top = pane.top
             mode = "history"
         visual_index = top + local_y
+        if clamp and visual:
+            visual_index = min(max(0, visual_index), len(visual) - 1)
         if visual_index < 0 or visual_index >= len(visual):
-            return False
+            return None
+
         raw_row = visual[visual_index]
         table = bool(pane._is_markdown_table_visual(raw_row))
-        pane._mouse_selection_table = table
         viewport_start = pane.horizontal_offset if pane.horizontal_offset and (not pane.wrap_enabled or table) else 0
         content_x = event.x - rect.x - 1
+        if clamp:
+            content_x = min(max(0, content_x), inner_w - 1)
         if content_x < 0 or content_x >= inner_w:
-            return False
-        full_column = viewport_start + content_x
+            return None
         plain = core.strip_ansi(raw_row)
-        if full_column < 0 or full_column >= len(plain):
+        full_column = viewport_start + content_x
+        if clamp:
+            full_column = min(max(0, full_column), len(plain))
+        elif full_column < 0 or full_column >= len(plain):
+            return None
+        return mode, visual, visual_index, full_column, plain, table
+
+    def _set_mouse_selection(
+        self,
+        pane,
+        mode: str,
+        visual,
+        start_visual: int,
+        start_col: int,
+        end_visual: int,
+        end_col: int,
+    ) -> MouseSelection:
+        text = _selection_text(visual, start_visual, start_col, end_visual, end_col)
+        selection = MouseSelection(
+            mode, start_visual, start_col, end_visual, end_col, text
+        )
+        pane._mouse_selection = selection
+        marker = getattr(self, "_mark_pane_dirty", None)
+        if callable(marker):
+            try:
+                marker(-1 if pane is self.stream else self.panes.index(pane))
+            except ValueError:
+                self.dirty = True
+        else:
+            self.dirty = True
+        return selection
+
+    def _start_mouse_word_selection(self, event, target_index: int, pane, rect) -> bool:
+        point = _mouse_point(self, event, target_index, pane, rect)
+        if point is None:
+            return False
+        mode, visual, visual_index, full_column, plain, table = point
+        if full_column >= len(plain):
             return False
         selected = _selection_word(plain, full_column)
         if selected is None:
             return False
         start, end, text = selected
         _clear_other_selections(self, pane)
-        pane._mouse_selection = (mode, visual_index, start, end, text)
+        pane._mouse_selection_table = table
+        selection = _set_mouse_selection(
+            self, pane, mode, visual, visual_index, start, visual_index, end
+        )
+        self._mouse_drag_selection = {
+            "target": target_index,
+            "pane": pane,
+            "mode": mode,
+            "visual": visual,
+            "anchor_visual": visual_index,
+            "anchor_start": start,
+            "anchor_end": end,
+            "dragged": False,
+        }
         try:
-            _osc52_copy(text)
+            _osc52_copy(selection.text)
             pane.set_message(f"copied: {text}", 2.5)
         except Exception:
             pane.set_message(f"selected: {text}", 2.5)
-        _invalidate_app_render(self)
+        return True
+
+    def _extend_mouse_selection(self, event) -> bool:
+        drag = self._mouse_drag_selection
+        if not isinstance(drag, dict):
+            return False
+        target = int(drag["target"])
+        rect = next((rect for index, rect in self.last_rects if index == target), None)
+        if rect is None:
+            return False
+        pane = drag["pane"]
+        point = _mouse_point(self, event, target, pane, rect, clamp=True)
+        if point is None:
+            return False
+        mode, visual, visual_index, full_column, _plain, table = point
+        if mode != drag["mode"]:
+            return False
+        pane._mouse_selection_table = table
+        anchor_visual = int(drag["anchor_visual"])
+        anchor_start = int(drag["anchor_start"])
+        anchor_end = int(drag["anchor_end"])
+        if (visual_index, full_column) < (anchor_visual, anchor_start):
+            start_visual, start_col = visual_index, full_column
+            end_visual, end_col = anchor_visual, anchor_end
+        else:
+            start_visual, start_col = anchor_visual, anchor_start
+            end_visual, end_col = visual_index, full_column
+            if 0 <= visual_index < len(visual):
+                end_col = min(len(core.strip_ansi(visual[visual_index])), end_col + 1)
+        _set_mouse_selection(
+            self, pane, mode, visual, start_visual, start_col, end_visual, end_col
+        )
+        drag["dragged"] = True
+        return True
+
+    def _finish_mouse_selection(self) -> bool:
+        drag = self._mouse_drag_selection
+        self._mouse_drag_selection = None
+        if not isinstance(drag, dict):
+            return False
+        pane = drag["pane"]
+        selection = getattr(pane, "_mouse_selection", None)
+        if not isinstance(selection, MouseSelection):
+            return False
+        if drag.get("dragged"):
+            try:
+                _osc52_copy(selection.text)
+                pane.set_message(
+                    f"copied selection ({len(selection.text)} chars)", 2.5
+                )
+            except Exception:
+                pane.set_message(
+                    f"selected ({len(selection.text)} chars)", 2.5
+                )
         return True
 
     def execute_palette_item(self) -> None:
@@ -736,6 +998,14 @@ def _install_app_features() -> None:
             _apply_palette(str(item.value), persist=True)
             _invalidate_app_render(self)
             self.set_message(f"UI palette: {current_palette_name()}", 3.0)
+            self.palette_active = False
+            return
+        if item.action == "scrollbar-style":
+            current = current_scrollbar_style()
+            next_index = (SCROLLBAR_STYLES.index(current) + 1) % len(SCROLLBAR_STYLES)
+            selected = _apply_scrollbar_style(SCROLLBAR_STYLES[next_index], persist=True)
+            _invalidate_app_render(self)
+            self.set_message(f"scrollbar style: {SCROLLBAR_LABELS[selected]}", 3.0)
             self.palette_active = False
             return
         if item.action == "close-pane":
@@ -769,7 +1039,7 @@ def _install_app_features() -> None:
                 rows.append(line)
             rows.extend([
                 "",
-                "↑/↓ field · ←/→ ±1 · PgUp/PgDn ±8 · s save/update · Esc cancel",
+                "↑/↓ field · ←/→ ±1 · PgUp/PgDn ±8 · s save/update · Esc/q cancel",
             ])
             return app_module._panel_lines("UI palette editor", rows, width, height, self.color, max_width=96, min_width=58)
         if self.palette_mode == "ui-themes":
@@ -787,7 +1057,7 @@ def _install_app_features() -> None:
                 rows.append(line)
             rows.extend([
                 "",
-                "Enter apply · n new copy · e edit custom · d delete custom · Esc close",
+                "Enter apply · n new copy · e edit custom · d delete custom · Esc/q close",
                 "Built-in palettes are read-only.",
             ])
             return app_module._panel_lines("UI themes", rows, width, height, self.color, max_width=88, min_width=52)
@@ -797,6 +1067,13 @@ def _install_app_features() -> None:
         if not self.palette_active or self.palette_mode not in {"ui-themes", "ui-theme-name", "ui-theme-editor"}:
             return None
         if not isinstance(key, str):
+            burst_key = getattr(key, "key", None)
+            burst_count = int(getattr(key, "count", 0) or 0)
+            if isinstance(burst_key, str) and burst_count > 0:
+                result = False
+                for _ in range(min(burst_count, 12)):
+                    result = bool(handle_theme_input(self, burst_key)) or result
+                return result
             return False
 
         if self.palette_mode == "ui-theme-name":
@@ -823,7 +1100,7 @@ def _install_app_features() -> None:
             return False
 
         if self.palette_mode == "ui-theme-editor":
-            if key == "ESC":
+            if key in ("ESC", "q", "Q"):
                 self.palette_mode = "ui-themes"; self._ui_theme_draft = None; self.dirty = True; return False
             if key in ("UP", "DOWN"):
                 delta = -1 if key == "UP" else 1
@@ -840,7 +1117,7 @@ def _install_app_features() -> None:
             return False
 
         # ui-themes list
-        if key == "ESC":
+        if key in ("ESC", "q", "Q"):
             self.palette_active = False; self.dirty = True; return False
         if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN"):
             self._refresh_palette()
@@ -875,7 +1152,7 @@ def _install_app_features() -> None:
     def status_lines(self, width: int, height: int):
         rows = list(original_status_lines(self, width, height))
         if len(rows) > 1:
-            rows[1] += " · Alt+arrows pane · Ctrl+W close · double-click copy"
+            rows[1] += " · Alt+arrows pane · Ctrl+W close · double-click/drag copy"
         return rows
 
     def handle_input(self, event):
@@ -903,13 +1180,30 @@ def _install_app_features() -> None:
         return original_handle_input(self, event)
 
     def handle_mouse(self, event) -> None:
-        # Let the compatibility handler establish focus and preserve wheel behaviour.
+        # Drag motion and release are selection-only events. Do not feed them to
+        # the compatibility click handler: that path marks the whole frame dirty
+        # on every left-button event and would reintroduce visible drag flicker.
+        if getattr(event, "button", None) == "left" and getattr(event, "motion", False):
+            if getattr(event, "pressed", False):
+                _extend_mouse_selection(self, event)
+            return None
+        if getattr(event, "button", None) == "left" and not getattr(event, "pressed", False):
+            _finish_mouse_selection(self)
+            return None
+
         result = original_handle_mouse(self, event)
-        if event.button != "left" or not event.pressed:
+        if getattr(event, "button", None) != "left":
             return result
+
         target = self._pane_at(event.x, event.y)
         if target is None:
             return result
+        # A normal click in another pane makes that pane the sole possible
+        # selection owner. The existing selection survives clicks inside its
+        # own pane until a new selection starts.
+        pane = self.stream if target == -1 else self.panes[target]
+        _clear_other_selections(self, pane)
+
         now = time.monotonic()
         same_target = target == self._last_left_click_target
         last_xy = self._last_left_click_xy
@@ -919,13 +1213,14 @@ def _install_app_features() -> None:
         self._last_left_click_target = target
         self._last_left_click_xy = (event.x, event.y)
         if not is_double:
+            self._mouse_drag_selection = None
             return result
+
         self._last_left_click_time = 0.0
         rect = next((rect for index, rect in self.last_rects if index == target), None)
         if rect is None:
             return result
-        pane = self.stream if target == -1 else self.panes[target]
-        _select_mouse_word(self, event, target, pane, rect)
+        _start_mouse_word_selection(self, event, target, pane, rect)
         return result
 
     MultiApp.__init__ = app_init
@@ -946,6 +1241,7 @@ def install() -> None:
         return
     core.paint = _themed_paint
     _load_active_palette()
+    _load_scrollbar_style()
     _install_pane_chrome()
     _install_input_keys()
     _install_app_features()

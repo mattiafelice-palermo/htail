@@ -103,6 +103,29 @@ def _install() -> None:
         )
         self.terminal_fast_rows_written += 1
 
+    def scroll_content_key(row: str) -> str:
+        """Return the scroll-shifted content, excluding scrollbar-only chrome.
+
+        ui_features can render either a thumb in the right border or a
+        separate ``bar + gap + border`` rail.  Those cells are anchored to the
+        viewport, not the file content, so they must not make an otherwise
+        pure vertical content shift ineligible for DECSTBM scrolling.
+        """
+        plain = app_module.core.strip_ansi(row)
+        cutoff = len(plain)
+        if (
+            len(plain) >= 3
+            and plain[-2] == " "
+            and plain[-1] in {"│", "┃"}
+            and plain[-3] in {"│", "█", "▐", " "}
+        ):
+            cutoff -= 3
+        elif plain.endswith(("│", "┃")):
+            cutoff -= 1
+        if cutoff == len(plain):
+            return row
+        return app_module.core.visible_prefix_ansi(row, max(0, cutoff))
+
     def scroll_equivalent(old_rows: Sequence[str], new_rows: Sequence[str], delta: int) -> bool:
         if len(old_rows) != len(new_rows) or len(old_rows) < 3 or delta == 0:
             return False
@@ -111,8 +134,12 @@ def _install() -> None:
         if amount <= 0 or amount >= len(old_body):
             return False
         if delta > 0:
-            return tuple(old_body[amount:]) == tuple(new_body[:-amount])
-        return tuple(old_body[:-amount]) == tuple(new_body[amount:])
+            return tuple(map(scroll_content_key, old_body[amount:])) == tuple(
+                map(scroll_content_key, new_body[:-amount])
+            )
+        return tuple(map(scroll_content_key, old_body[:-amount])) == tuple(
+            map(scroll_content_key, new_body[amount:])
+        )
 
     def write_rect_diff(self, rect, old_rows: Sequence[str], new_rows: Sequence[str]) -> None:
         for local_y, (old, new) in enumerate(zip(old_rows, new_rows)):
@@ -131,55 +158,99 @@ def _install() -> None:
             terminal_write_row(self, rect, 0, new_rows[0])
         if old_rows[-1] != new_rows[-1]:
             terminal_write_row(self, rect, rect.height - 1, new_rows[-1])
-        exposed = range(body_len - amount, body_len) if delta > 0 else range(0, amount)
-        for body_index in exposed:
-            terminal_write_row(self, rect, 1 + body_index, new_rows[1 + body_index])
+        old_body = old_rows[1:-1]
+        new_body = new_rows[1:-1]
+        for body_index in range(body_len):
+            if delta > 0:
+                source_index = body_index + amount
+                shifted = old_body[source_index] if source_index < body_len else None
+            else:
+                source_index = body_index - amount
+                shifted = old_body[source_index] if source_index >= 0 else None
+            # Exposed rows always need painting. Retained rows normally arrive
+            # at their final content through the terminal scroll itself, but
+            # viewport-anchored scrollbar chrome may differ and is corrected
+            # here without giving up the scroll-region fast path.
+            if shifted is None or shifted != new_body[body_index]:
+                terminal_write_row(self, rect, 1 + body_index, new_body[body_index])
         self.terminal_scroll_region_uses += 1
 
     def fast_render(self) -> bool:
         scope = getattr(self, "_render_dirty_panes", None)
-        if not self.dirty or scope is None or len(scope) != 1 or not self._terminal_fast_ready:
+        if not self.dirty or scope is None or not scope or len(scope) > 2 or not self._terminal_fast_ready:
             return False
         if terminal_geometry(self) != self._terminal_fast_geometry:
             return False
-        index = next(iter(scope))
-        rect = next((rect for pane_index, rect in self.last_rects if pane_index == index), None)
-        if rect is None or rect.width <= 0 or rect.height <= 0:
-            return False
-        old_entry = self._render_pane_box_cache.get(index)
-        if old_entry is None:
-            return False
-        pane = self.stream if index == -1 else self.panes[index]
-        new_entry = rendered_box_entry(self, index, pane, rect)
-        if new_entry.geometry != old_entry.geometry or len(new_entry.rows) != len(old_entry.rows):
-            return False
 
-        self._render_pane_box_cache[index] = new_entry
+        entries = []
+        for index in sorted(scope):
+            rect = next((rect for pane_index, rect in self.last_rects if pane_index == index), None)
+            if rect is None or rect.width <= 0 or rect.height <= 0:
+                return False
+            old_entry = self._render_pane_box_cache.get(index)
+            if old_entry is None:
+                return False
+            pane = self.stream if index == -1 else self.panes[index]
+            new_entry = rendered_box_entry(self, index, pane, rect)
+            geometry_matches = new_entry.geometry == old_entry.geometry
+            if len(scope) == 2 and not geometry_matches:
+                # The focused flag is the expected geometry-key difference for
+                # an old/new focus pair. All physical dimensions and reserved
+                # rows must remain identical for rectangle damage to be safe.
+                geometry_matches = (
+                    old_entry.geometry[:2] + old_entry.geometry[3:]
+                    == new_entry.geometry[:2] + new_entry.geometry[3:]
+                )
+            if not geometry_matches or len(new_entry.rows) != len(old_entry.rows):
+                return False
+            entries.append((index, rect, old_entry, new_entry))
+
         hint = self._terminal_scroll_hint
-        content_width, _, _ = self.content_dimensions()
-        if (
-            hint is not None
-            and hint[0] == index
-            and rect.x == 0
-            and rect.width == content_width
-            and scroll_equivalent(old_entry.rows, new_entry.rows, int(hint[1]))
-        ):
-            write_scroll_region(self, rect, old_entry.rows, new_entry.rows, int(hint[1]))
+        content_width, body_height, _ = self.content_dimensions()
+        if len(entries) == 1:
+            index, rect, old_entry, new_entry = entries[0]
+            self._render_pane_box_cache[index] = new_entry
+            if (
+                hint is not None
+                and hint[0] == index
+                and rect.x == 0
+                and rect.width == content_width
+                and scroll_equivalent(old_entry.rows, new_entry.rows, int(hint[1]))
+            ):
+                write_scroll_region(self, rect, old_entry.rows, new_entry.rows, int(hint[1]))
+            else:
+                write_rect_diff(self, rect, old_entry.rows, new_entry.rows)
         else:
-            write_rect_diff(self, rect, old_entry.rows, new_entry.rows)
+            # Focus movement changes exactly two panes: the pane losing focus and
+            # the pane gaining it. Updating their rectangles directly avoids the
+            # full-width clear/repaint that visibly flickers in Grid layouts.
+            if hint is not None:
+                return False
+            for index, rect, old_entry, new_entry in entries:
+                self._render_pane_box_cache[index] = new_entry
+                write_rect_diff(self, rect, old_entry.rows, new_entry.rows)
 
-        sys.stdout.flush()
-        self.render_frames += 1
-
-        # Direct terminal writes must also advance the in-memory full-frame
-        # baseline. Otherwise the next unrelated dirty event sees no baseline
-        # and the compatibility renderer clears/redraws the whole terminal.
         dirty_scope = self._render_dirty_panes
         self._render_dirty_panes = set()
         try:
             frame_width, frame = self._frame_rows()
         finally:
             self._render_dirty_panes = dirty_scope
+
+        # Focus changes also alter the status/footer text. Repaint only those
+        # terminal rows; never clear the Grid body rows that were just updated
+        # rectangle-by-rectangle.
+        previous = self._last_frame or []
+        for row in range(body_height, len(frame)):
+            if row >= len(previous) or previous[row] != frame[row]:
+                terminal_write(
+                    self,
+                    f"\033[{row + 1};1H" + app_module.core.RESET + app_module.core.CLEAR_LINE + frame[row] + app_module.core.RESET,
+                )
+                self.terminal_fast_rows_written += 1
+
+        sys.stdout.flush()
+        self.render_frames += 1
         self._last_frame = list(frame)
         self._last_frame_geometry = (frame_width, len(frame))
         self._terminal_fast_geometry = terminal_geometry(self)

@@ -70,7 +70,9 @@ class TerminalFastPathTests(unittest.TestCase):
                 self.assertIn("\x1b[1T", data)
                 self.assertIn("\x1b[r", data)
                 # One exposed body row plus title/bottom position indicators.
-                self.assertLessEqual(application.terminal_fast_rows_written, 3)
+                # The viewport-anchored scrollbar may require one additional
+                # row correction after the terminal shifts the content region.
+                self.assertLessEqual(application.terminal_fast_rows_written, 4)
             finally:
                 application.close_native_watch()
 

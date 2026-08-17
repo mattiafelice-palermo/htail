@@ -7,8 +7,10 @@ import sys
 import time
 from typing import Optional, Union
 
-MOUSE_ENABLE = "\033[?1000h\033[?1006h"
-MOUSE_DISABLE = "\033[?1000l\033[?1006l"
+# Button-event tracking (1002) reports drag motion while a mouse button is
+# held. SGR coordinates (1006) keep the existing unambiguous event encoding.
+MOUSE_ENABLE = "\033[?1002h\033[?1006h"
+MOUSE_DISABLE = "\033[?1002l\033[?1006l"
 
 
 @dataclass(frozen=True)
@@ -17,6 +19,7 @@ class MouseEvent:
     y: int
     button: str
     pressed: bool = True
+    motion: bool = False
 
 
 InputEvent = Union[str, MouseEvent]
@@ -57,13 +60,14 @@ def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
     y = max(0, int(match.group(3)) - 1)
     pressed = match.group(4) == "M"
     base = code & 0b11
+    motion = bool(code & 32)
     if code & 64:
         button = "wheel_down" if base == 1 else "wheel_up"
     elif base == 0:
         button = "left"
     else:
         button = "other"
-    return MouseEvent(x=x, y=y, button=button, pressed=pressed)
+    return MouseEvent(x=x, y=y, button=button, pressed=pressed, motion=motion)
 
 
 class InputReader:
