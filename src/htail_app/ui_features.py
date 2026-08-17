@@ -714,7 +714,7 @@ def _install_app_features() -> None:
         if selected is None:
             return False
         start, end, text = selected
-        self._clear_other_selections(pane)
+        _clear_other_selections(self, pane)
         pane._mouse_selection = (mode, visual_index, start, end, text)
         try:
             _osc52_copy(text)
@@ -882,7 +882,17 @@ def _install_app_features() -> None:
         handled = handle_theme_input(self, event)
         if handled is not None:
             return handled
-        if not any((self.palette_active, self.global_search_active, self.prompt_mode, self.update_confirm_active, self.layout_menu, self.help_active)):
+        if not any(
+            bool(getattr(self, name, False))
+            for name in (
+                "palette_active",
+                "global_search_active",
+                "prompt_mode",
+                "update_confirm_active",
+                "layout_menu",
+                "help_active",
+            )
+        ):
             if event in {"ALT_UP", "ALT_DOWN", "ALT_LEFT", "ALT_RIGHT"}:
                 direction = str(event).split("_", 1)[1].lower()
                 _focus_direction(self, direction)
