@@ -1,3 +1,17 @@
+# htail 0.17.0
+
+## New features
+
+- Every scrollable pane now has a conventional proportional scrollbar in its right border. The thumb size reflects the visible fraction of the rendered file/history and its position follows the pane viewport.
+- Focused panes can now be closed with `Ctrl+W` or from the command palette. Closing a pane stops its follower/process, repairs focus/layout state, and keeps deliberately closed dynamic-glob panes from immediately reopening.
+- htail now has persistent full-UI color palettes for pane chrome, status/footer UI, warnings, selections and scrollbars. The command palette opens an in-app palette manager where built-in palettes can be applied or copied and custom palettes can be created, edited, saved/updated and deleted; built-ins remain immutable.
+- Double-clicking text inside a pane now selects and highlights the token only in that pane and copies it through the terminal OSC 52 clipboard protocol. A later double-click in another pane moves the selection there.
+- `Alt+Up`, `Alt+Down`, `Alt+Left` and `Alt+Right` now move focus spatially between panes while preserving the existing `Ctrl+Arrow` pane-resize controls.
+
+## Bug fixes
+
+- None.
+
 # htail 0.16.19
 
 ## New features
@@ -49,7 +63,7 @@
 
 ## New features
 
-- Interactive rendering now keeps complete rendered pane boxes for unchanged panes and uses pane-scoped invalidation for ordinary keyboard/mouse scrolling, so moving through one file does not re-render every other visible pane.
+- Interactive rendering now keeps complete rendered pane boxes for unchanged panes and uses pane-scoped invalidation for ordinary keyboard/mouse scrolling, so moving through one file does not re-render every other pane.
 - Stable viewport-row decoration is now cached, avoiding repeated URL-linkification, horizontal slicing, ANSI clipping, and padding work when the same rendered rows remain visible across scroll frames.
 - A dedicated `benchmarks/render_scroll.py` benchmark now measures scoped-scroll frame cost, all-pane rebuild cost, and pane/viewport cache hit rates on synthetic multi-pane files.
 

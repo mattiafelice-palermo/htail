@@ -1,6 +1,6 @@
 """htail application package."""
 
-VERSION = "0.16.19"
+VERSION = "0.17.0"
 
 # Keep the frozen compatibility core unchanged on disk while layering current
 # application rendering features onto its highlighter API.
@@ -14,6 +14,7 @@ from .input_accel import install as _install_input_accel
 from .perf_trace import install as _install_perf_trace
 from .syntax_features import install as _install_syntax_features
 from .terminal_cells import install as _install_terminal_cells
+from .ui_features import install as _install_ui_features
 
 _install_rendering_extensions()
 _install_update_transport()
@@ -25,6 +26,7 @@ _install_input_accel()
 _install_perf_trace()
 _install_syntax_features()
 _install_terminal_cells()
+_install_ui_features()
 del _install_rendering_extensions
 del _install_update_transport
 del _install_release_notes
@@ -35,3 +37,4 @@ del _install_input_accel
 del _install_perf_trace
 del _install_syntax_features
 del _install_terminal_cells
+del _install_ui_features
