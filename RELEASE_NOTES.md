@@ -1,3 +1,14 @@
+# htail 0.17.2
+
+## New features
+
+- The UI palette editor now exposes H/S/L controls for each palette role, with keyboard-adjustable range bars, a live xterm-256 sample, and a low-resolution saturation/lightness colour field that uses terminal half-block cells for additional vertical guidance.
+- Scrollbar style selection now opens a dedicated picker for Rail, Border, Minimal, and Off instead of cycling through styles one command invocation at a time.
+
+## Bug fixes
+
+- Mouse text selection now tolerates both standard and legacy SGR drag/release encodings, tracks the held left button independently, extends double-click word selections on the final release even when no motion events arrive, and also supports ordinary character drag selection with copy on release.
+
 # htail 0.17.1
 
 ## New features

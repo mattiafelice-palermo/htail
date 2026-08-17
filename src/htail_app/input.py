@@ -9,8 +9,8 @@ from typing import Optional, Union
 
 # Button-event tracking (1002) reports drag motion while a mouse button is
 # held. SGR coordinates (1006) keep the existing unambiguous event encoding.
-MOUSE_ENABLE = "\033[?1002h\033[?1006h"
-MOUSE_DISABLE = "\033[?1002l\033[?1006l"
+MOUSE_ENABLE = "\033[?1000h\033[?1002h\033[?1006h"
+MOUSE_DISABLE = "\033[?1002l\033[?1000l\033[?1006l"
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,14 @@ def parse_escape_sequence(seq: str) -> Optional[InputEvent]:
     motion = bool(code & 32)
     if code & 64:
         button = "wheel_down" if base == 1 else "wheel_up"
+    elif motion and base == 3:
+        # A number of terminal emulators report held-button movement with the
+        # legacy "no button" low bits even while button-event tracking (1002)
+        # is active. The application tracks whether the left button is down,
+        # so preserve this as generic motion rather than discarding the drag.
+        button = "motion"
+    elif not pressed and base == 3:
+        button = "release"
     elif base == 0:
         button = "left"
     else:

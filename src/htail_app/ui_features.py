@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import colorsys
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 import sys
 import time
@@ -26,6 +28,28 @@ SCROLLBAR_LABELS = {
     "minimal": "Minimal",
     "off": "Off",
 }
+HSL_COMPONENTS = ("H", "S", "L")
+
+_XTERM_BASE_RGB = (
+    (0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
+    (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
+    (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0),
+    (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
+)
+
+
+def _build_xterm_rgb() -> Tuple[Tuple[int, int, int], ...]:
+    colors = list(_XTERM_BASE_RGB)
+    levels = (0, 95, 135, 175, 215, 255)
+    for red in levels:
+        for green in levels:
+            for blue in levels:
+                colors.append((red, green, blue))
+    colors.extend((value, value, value) for value in range(8, 239, 10))
+    return tuple(colors)
+
+
+_XTERM_RGB = _build_xterm_rgb()
 
 
 @dataclass(frozen=True)
@@ -154,6 +178,112 @@ def _clamp_color(value: object, fallback: int) -> int:
         return max(0, min(255, int(value)))
     except (TypeError, ValueError):
         return fallback
+
+
+def _xterm_index_to_hsl(index: int) -> Tuple[float, float, float]:
+    red, green, blue = _XTERM_RGB[_clamp_color(index, 0)]
+    hue, lightness, saturation = colorsys.rgb_to_hls(red / 255.0, green / 255.0, blue / 255.0)
+    return hue * 360.0, saturation * 100.0, lightness * 100.0
+
+
+@lru_cache(maxsize=8192)
+def _hsl_to_xterm_index(hue: float, saturation: float, lightness: float) -> int:
+    hue = hue % 360.0
+    saturation = max(0.0, min(100.0, saturation))
+    lightness = max(0.0, min(100.0, lightness))
+    red, green, blue = colorsys.hls_to_rgb(hue / 360.0, lightness / 100.0, saturation / 100.0)
+    target = (round(red * 255), round(green * 255), round(blue * 255))
+    return min(
+        range(256),
+        key=lambda candidate: sum(
+            (target[channel] - _XTERM_RGB[candidate][channel]) ** 2
+            for channel in range(3)
+        ),
+    )
+
+
+def _theme_hsl_draft(values: Mapping[str, int]) -> Dict[str, Tuple[float, float, float]]:
+    return {field: _xterm_index_to_hsl(int(values[field])) for field, _label in PALETTE_FIELDS}
+
+
+def _range_marker(value: float, maximum: float, width: int = 24) -> str:
+    width = max(5, width)
+    position = int(round((max(0.0, min(maximum, value)) / maximum) * (width - 1))) if maximum else 0
+    return "[" + "".join("◆" if index == position else "─" for index in range(width)) + "]"
+
+
+def _hue_bar(hue: float, width: int = 24, *, color: bool) -> str:
+    if not color:
+        return _range_marker(hue, 359.0, width)
+    marker = int(round((hue % 360.0) / 359.0 * (width - 1)))
+    cells = []
+    for index in range(width):
+        sample_hue = index / max(1, width - 1) * 359.0
+        sample = _hsl_to_xterm_index(sample_hue, 100.0, 50.0)
+        glyph = "◆" if index == marker else "━"
+        cells.append(_ORIGINAL_PAINT(glyph, _fg(sample, bold=True), True))
+    return "[" + "".join(cells) + "]"
+
+
+def _hsl_component_bar(
+    hue: float,
+    saturation: float,
+    lightness: float,
+    component: str,
+    width: int = 24,
+    *,
+    color: bool,
+) -> str:
+    if component == "H":
+        return _hue_bar(hue, width, color=color)
+    value = saturation if component == "S" else lightness
+    if not color:
+        return _range_marker(value, 100.0, width)
+    marker = int(round(max(0.0, min(100.0, value)) / 100.0 * (width - 1)))
+    cells = []
+    for index in range(width):
+        sample = index / max(1, width - 1) * 100.0
+        sample_s = sample if component == "S" else saturation
+        sample_l = sample if component == "L" else lightness
+        color_index = _hsl_to_xterm_index(hue, sample_s, sample_l)
+        glyph = "◆" if index == marker else "━"
+        cells.append(_ORIGINAL_PAINT(glyph, _fg(color_index, bold=True), True))
+    return "[" + "".join(cells) + "]"
+
+
+def _hsl_square(hue: float, saturation: float, lightness: float, *, color: bool, width: int = 24, rows: int = 8) -> List[str]:
+    """Render a compact saturation/lightness field for one fixed hue.
+
+    Each terminal character is a fixed cell, so this is not pixel-addressable.
+    In colour mode the upper/lower half-block colours double vertical sample
+    density while staying inside normal terminal rendering semantics.
+    """
+    marker_x = int(round(max(0.0, min(100.0, saturation)) / 100.0 * (width - 1)))
+    vertical_samples = rows * 2
+    marker_y = int(round((100.0 - max(0.0, min(100.0, lightness))) / 100.0 * (vertical_samples - 1)))
+    out: List[str] = []
+    for row in range(rows):
+        cells: List[str] = []
+        for column in range(width):
+            sample_s = column / max(1, width - 1) * 100.0
+            top_sample = row * 2
+            bottom_sample = min(vertical_samples - 1, top_sample + 1)
+            top_l = 100.0 - top_sample / max(1, vertical_samples - 1) * 100.0
+            bottom_l = 100.0 - bottom_sample / max(1, vertical_samples - 1) * 100.0
+            if not color:
+                glyph = "◆" if column == marker_x and marker_y in {top_sample, bottom_sample} else "·"
+                cells.append(glyph)
+                continue
+            top_index = _hsl_to_xterm_index(hue, sample_s, top_l)
+            bottom_index = _hsl_to_xterm_index(hue, sample_s, bottom_l)
+            if column == marker_x and marker_y in {top_sample, bottom_sample}:
+                red, green, blue = _XTERM_RGB[_hsl_to_xterm_index(hue, sample_s, (top_l + bottom_l) / 2.0)]
+                marker_fg = 16 if (red * 299 + green * 587 + blue * 114) > 150000 else 231
+                cells.append(f"\x1b[1;38;5;{marker_fg};48;5;{bottom_index}m◆\x1b[0m")
+            else:
+                cells.append(f"\x1b[38;5;{top_index};48;5;{bottom_index}m▀\x1b[0m")
+        out.append("".join(cells))
+    return out
 
 
 def _normalize_palette(values: Mapping[str, object], base: Optional[Mapping[str, int]] = None) -> Dict[str, int]:
@@ -676,9 +806,13 @@ def _install_app_features() -> None:
         self._last_left_click_time = 0.0
         self._last_left_click_target = None
         self._last_left_click_xy = None
+        self._left_button_down = False
+        self._mouse_press_candidate = None
         self._mouse_drag_selection = None
         self._ui_theme_field = 0
+        self._ui_theme_component = 0
         self._ui_theme_draft = None
+        self._ui_theme_hsl_draft = None
         self._ui_theme_draft_name = None
         self._ui_theme_edit_existing = False
 
@@ -694,14 +828,31 @@ def _install_app_features() -> None:
                 prefix = "✓ " if name == active else ""
                 items.append(app_module.PaletteItem(prefix + name, "ui-theme-select", name, "CUSTOM"))
             return items
+        if self.palette_mode == "scrollbar-styles":
+            active = current_scrollbar_style()
+            details = {
+                "rail": "separate proportional rail",
+                "border": "thumb replaces right border",
+                "minimal": "thumb only, no full track",
+                "off": "no scrollbar chrome",
+            }
+            return [
+                app_module.PaletteItem(
+                    ("✓ " if style == active else "") + SCROLLBAR_LABELS[style],
+                    "scrollbar-style-select",
+                    style,
+                    details[style],
+                )
+                for style in SCROLLBAR_STYLES
+            ]
         items = list(original_palette_all_items(self))
         if self.palette_mode == "commands":
             items.append(app_module.PaletteItem("UI themes / palette editor…", "ui-themes", detail="apply / create / edit / delete"))
             style = current_scrollbar_style()
             items.append(app_module.PaletteItem(
-                f"Scrollbar style: {SCROLLBAR_LABELS[style]}",
-                "scrollbar-style",
-                detail="Enter cycles Rail / Border / Minimal / Off",
+                f"Scrollbar style…  {SCROLLBAR_LABELS[style]}",
+                "scrollbar-styles",
+                detail="choose Rail / Border / Minimal / Off",
             ))
             if self.layout != "stream" and self.panes:
                 items.append(app_module.PaletteItem("Close focused pane", "close-pane", detail="Ctrl+W"))
@@ -717,6 +868,16 @@ def _install_app_features() -> None:
             self.palette_selected = names.index(current_palette_name())
         self.dirty = True
 
+    def _open_scrollbar_styles(self) -> None:
+        self.palette_mode = "scrollbar-styles"
+        self.palette_buffer = ""
+        self.palette_selected = 0
+        self._refresh_palette()
+        values = [str(item.value) for item in self.palette_items]
+        if current_scrollbar_style() in values:
+            self.palette_selected = values.index(current_scrollbar_style())
+        self.dirty = True
+
     def _selected_ui_theme_name(self) -> str:
         self._refresh_palette()
         if not self.palette_items:
@@ -728,8 +889,10 @@ def _install_app_features() -> None:
         base_name = _selected_ui_theme_name(self)
         base = all_palettes().get(base_name, current_palette())
         self._ui_theme_draft = dict(base)
+        self._ui_theme_hsl_draft = _theme_hsl_draft(self._ui_theme_draft)
         self._ui_theme_draft_name = None
         self._ui_theme_edit_existing = False
+        self._ui_theme_component = 0
         self.palette_mode = "ui-theme-name"
         self.palette_buffer = ""
         self.dirty = True
@@ -743,8 +906,10 @@ def _install_app_features() -> None:
             return
         self._ui_theme_draft_name = name
         self._ui_theme_draft = dict(palettes[name])
+        self._ui_theme_hsl_draft = _theme_hsl_draft(self._ui_theme_draft)
         self._ui_theme_edit_existing = True
         self._ui_theme_field = 0
+        self._ui_theme_component = 0
         self.palette_mode = "ui-theme-editor"
         self.dirty = True
 
@@ -923,6 +1088,7 @@ def _install_app_features() -> None:
             "anchor_visual": visual_index,
             "anchor_start": start,
             "anchor_end": end,
+            "granularity": "word",
             "dragged": False,
         }
         try:
@@ -931,6 +1097,37 @@ def _install_app_features() -> None:
         except Exception:
             pane.set_message(f"selected: {text}", 2.5)
         return True
+
+    def _start_mouse_character_drag(self, event) -> bool:
+        candidate = self._mouse_press_candidate
+        if not isinstance(candidate, dict):
+            return False
+        target = int(candidate["target"])
+        pane = candidate["pane"]
+        rect = next((rect for index, rect in self.last_rects if index == target), None)
+        if rect is None:
+            return False
+        point = _mouse_point(self, event, target, pane, rect, clamp=True)
+        if point is None:
+            return False
+        mode, visual, _visual_index, _full_column, _plain, table = point
+        if mode != candidate["mode"]:
+            return False
+        _clear_other_selections(self, pane)
+        pane._mouse_selection_table = table
+        anchor_col = int(candidate["anchor_col"])
+        self._mouse_drag_selection = {
+            "target": target,
+            "pane": pane,
+            "mode": mode,
+            "visual": visual,
+            "anchor_visual": int(candidate["anchor_visual"]),
+            "anchor_start": anchor_col,
+            "anchor_end": anchor_col + 1,
+            "granularity": "character",
+            "dragged": False,
+        }
+        return _extend_mouse_selection(self, event)
 
     def _extend_mouse_selection(self, event) -> bool:
         drag = self._mouse_drag_selection
@@ -944,21 +1141,27 @@ def _install_app_features() -> None:
         point = _mouse_point(self, event, target, pane, rect, clamp=True)
         if point is None:
             return False
-        mode, visual, visual_index, full_column, _plain, table = point
+        mode, visual, visual_index, full_column, plain, table = point
         if mode != drag["mode"]:
             return False
         pane._mouse_selection_table = table
         anchor_visual = int(drag["anchor_visual"])
         anchor_start = int(drag["anchor_start"])
         anchor_end = int(drag["anchor_end"])
-        if (visual_index, full_column) < (anchor_visual, anchor_start):
-            start_visual, start_col = visual_index, full_column
+        endpoint_start = full_column
+        endpoint_end = full_column + 1
+        if drag.get("granularity") == "word" and plain:
+            word_column = min(max(0, full_column), len(plain) - 1)
+            selected = _selection_word(plain, word_column)
+            if selected is not None:
+                endpoint_start, endpoint_end, _text = selected
+        endpoint_end = min(len(plain), endpoint_end)
+        if (visual_index, endpoint_start) < (anchor_visual, anchor_start):
+            start_visual, start_col = visual_index, endpoint_start
             end_visual, end_col = anchor_visual, anchor_end
         else:
             start_visual, start_col = anchor_visual, anchor_start
-            end_visual, end_col = visual_index, full_column
-            if 0 <= visual_index < len(visual):
-                end_col = min(len(core.strip_ansi(visual[visual_index])), end_col + 1)
+            end_visual, end_col = visual_index, endpoint_end
         _set_mouse_selection(
             self, pane, mode, visual, start_visual, start_col, end_visual, end_col
         )
@@ -994,16 +1197,17 @@ def _install_app_features() -> None:
         if item.action == "ui-themes":
             _open_ui_themes(self)
             return
+        if item.action == "scrollbar-styles":
+            _open_scrollbar_styles(self)
+            return
         if item.action == "ui-theme-select":
             _apply_palette(str(item.value), persist=True)
             _invalidate_app_render(self)
             self.set_message(f"UI palette: {current_palette_name()}", 3.0)
             self.palette_active = False
             return
-        if item.action == "scrollbar-style":
-            current = current_scrollbar_style()
-            next_index = (SCROLLBAR_STYLES.index(current) + 1) % len(SCROLLBAR_STYLES)
-            selected = _apply_scrollbar_style(SCROLLBAR_STYLES[next_index], persist=True)
+        if item.action == "scrollbar-style-select":
+            selected = _apply_scrollbar_style(str(item.value), persist=True)
             _invalidate_app_render(self)
             self.set_message(f"scrollbar style: {SCROLLBAR_LABELS[selected]}", 3.0)
             self.palette_active = False
@@ -1027,21 +1231,74 @@ def _install_app_features() -> None:
             return app_module._panel_lines("New UI palette", rows, width, height, self.color, max_width=86, min_width=48)
         if self.palette_mode == "ui-theme-editor":
             draft = self._ui_theme_draft or current_palette()
+            if not isinstance(self._ui_theme_hsl_draft, dict):
+                self._ui_theme_hsl_draft = _theme_hsl_draft(draft)
             name = self._ui_theme_draft_name or "custom"
-            rows = [core.paint(name, core.BOLD_LIGHT_CYAN, self.color), ""]
+            left_rows = [core.paint(name, core.BOLD_LIGHT_CYAN, self.color), ""]
             for index, (field, label) in enumerate(PALETTE_FIELDS):
                 value = int(draft[field])
-                sample = core.paint(" SAMPLE ", _fg(value, bold=True), self.color)
+                sample = core.paint("████", _fg(value, bold=True), self.color)
                 prefix = "› " if index == self._ui_theme_field else "  "
-                line = f"{prefix}{label:<30} {value:>3}  {sample}"
+                label_part = f"{prefix}{label:<29} {value:>3}"
                 if index == self._ui_theme_field:
-                    line = core.paint(line, _selection_style(), self.color)
-                rows.append(line)
+                    label_part = core.paint(label_part, _selection_style(), self.color)
+                left_rows.append(label_part + "  " + sample)
+
+            field, label = PALETTE_FIELDS[self._ui_theme_field]
+            hue, saturation, lightness = self._ui_theme_hsl_draft[field]
+            component = HSL_COMPONENTS[self._ui_theme_component]
+            right_rows = [
+                core.paint(label, core.BOLD_LIGHT_CYAN, self.color),
+                f"xterm-256 index {int(draft[field]):>3}  " + core.paint("████████", _fg(int(draft[field]), bold=True), self.color),
+                "",
+            ]
+            for component_index, component_name in enumerate(HSL_COMPONENTS):
+                value = {"H": hue, "S": saturation, "L": lightness}[component_name]
+                suffix = "°" if component_name == "H" else "%"
+                marker = "›" if component_index == self._ui_theme_component else " "
+                label_text = f"{marker} {component_name} {value:>5.1f}{suffix} "
+                if component_index == self._ui_theme_component:
+                    label_text = core.paint(label_text, _selection_style(), self.color)
+                right_rows.append(
+                    label_text
+                    + _hsl_component_bar(
+                        hue,
+                        saturation,
+                        lightness,
+                        component_name,
+                        22,
+                        color=self.color,
+                    )
+                )
+            right_rows.extend(["", "Saturation →"])
+            right_rows.extend(_hsl_square(hue, saturation, lightness, color=self.color, width=24, rows=6))
+            right_rows.append("Lightness: top 100% → bottom 0%")
+
+            if width >= 100 and height >= 20:
+                row_count = max(len(left_rows), len(right_rows))
+                rows = []
+                for row_index in range(row_count):
+                    left = left_rows[row_index] if row_index < len(left_rows) else ""
+                    right = right_rows[row_index] if row_index < len(right_rows) else ""
+                    rows.append(app_module._pad(left, 42) + "  " + right)
+            else:
+                rows = left_rows + ["", *right_rows[:6]]
             rows.extend([
                 "",
-                "↑/↓ field · ←/→ ±1 · PgUp/PgDn ±8 · s save/update · Esc/q cancel",
+                "↑/↓ role · Tab/Shift+Tab H/S/L · ←/→ ±1 · PgUp/PgDn ±10 · s save · Esc/q cancel",
             ])
-            return app_module._panel_lines("UI palette editor", rows, width, height, self.color, max_width=96, min_width=58)
+            return app_module._panel_lines("UI palette editor", rows, width, height, self.color, max_width=116, min_width=58)
+        if self.palette_mode == "scrollbar-styles":
+            self._refresh_palette()
+            rows = [core.paint("Choose a scrollbar style", core.BOLD_LIGHT_CYAN, self.color), ""]
+            for index, item in enumerate(self.palette_items):
+                prefix = "› " if index == self.palette_selected else "  "
+                line = f"{prefix}{item.label:<18} {item.detail}"
+                if index == self.palette_selected:
+                    line = core.paint(line, _selection_style(), self.color)
+                rows.append(line)
+            rows.extend(["", "↑/↓ choose · Enter apply · Esc back"])
+            return app_module._panel_lines("Scrollbar style", rows, width, height, self.color, max_width=72, min_width=52)
         if self.palette_mode == "ui-themes":
             self._refresh_palette()
             rows = [
@@ -1064,7 +1321,7 @@ def _install_app_features() -> None:
         return original_palette_lines(self, width, height)
 
     def handle_theme_input(self, key) -> Optional[bool]:
-        if not self.palette_active or self.palette_mode not in {"ui-themes", "ui-theme-name", "ui-theme-editor"}:
+        if not self.palette_active or self.palette_mode not in {"ui-themes", "ui-theme-name", "ui-theme-editor", "scrollbar-styles"}:
             return None
         if not isinstance(key, str):
             burst_key = getattr(key, "key", None)
@@ -1074,6 +1331,32 @@ def _install_app_features() -> None:
                 for _ in range(min(burst_count, 12)):
                     result = bool(handle_theme_input(self, burst_key)) or result
                 return result
+            return False
+
+        if self.palette_mode == "scrollbar-styles":
+            if key == "ESC":
+                self.palette_mode = "commands"
+                self.palette_buffer = ""
+                self.palette_selected = 0
+                self._refresh_palette()
+                self.dirty = True
+                return False
+            if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN"):
+                self._refresh_palette()
+                if self.palette_items:
+                    delta = {"UP": -1, "DOWN": 1, "PAGEUP": -4, "PAGEDOWN": 4}[key]
+                    self.palette_selected = min(max(0, self.palette_selected + delta), len(self.palette_items) - 1)
+                self.dirty = True
+                return False
+            if key in ("\r", "\n"):
+                self._refresh_palette()
+                if self.palette_items:
+                    item = self.palette_items[min(max(0, self.palette_selected), len(self.palette_items) - 1)]
+                    selected = _apply_scrollbar_style(str(item.value), persist=True)
+                    _invalidate_app_render(self)
+                    self.palette_active = False
+                    self.set_message(f"scrollbar style: {SCROLLBAR_LABELS[selected]}", 3.0)
+                return False
             return False
 
         if self.palette_mode == "ui-theme-name":
@@ -1091,6 +1374,9 @@ def _install_app_features() -> None:
                     self.set_message("palette already exists; edit it instead", 3.0); self.dirty = True; return False
                 self._ui_theme_draft_name = name
                 self._ui_theme_field = 0
+                self._ui_theme_component = 0
+                if isinstance(self._ui_theme_draft, dict):
+                    self._ui_theme_hsl_draft = _theme_hsl_draft(self._ui_theme_draft)
                 self.palette_mode = "ui-theme-editor"
                 self.palette_buffer = ""
                 self.dirty = True
@@ -1101,16 +1387,31 @@ def _install_app_features() -> None:
 
         if self.palette_mode == "ui-theme-editor":
             if key in ("ESC", "q", "Q"):
-                self.palette_mode = "ui-themes"; self._ui_theme_draft = None; self.dirty = True; return False
+                self.palette_mode = "ui-themes"; self._ui_theme_draft = None; self._ui_theme_hsl_draft = None; self.dirty = True; return False
             if key in ("UP", "DOWN"):
                 delta = -1 if key == "UP" else 1
                 self._ui_theme_field = (self._ui_theme_field + delta) % len(PALETTE_FIELDS)
                 self.dirty = True; return False
+            if key in ("TAB", "SHIFT_TAB"):
+                delta = -1 if key == "SHIFT_TAB" else 1
+                self._ui_theme_component = (self._ui_theme_component + delta) % len(HSL_COMPONENTS)
+                self.dirty = True; return False
             if key in ("LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"):
-                step = {"LEFT": -1, "RIGHT": 1, "PAGEUP": 8, "PAGEDOWN": -8}[key]
                 field = PALETTE_FIELDS[self._ui_theme_field][0]
                 assert isinstance(self._ui_theme_draft, dict)
-                self._ui_theme_draft[field] = (int(self._ui_theme_draft[field]) + step) % 256
+                if not isinstance(self._ui_theme_hsl_draft, dict):
+                    self._ui_theme_hsl_draft = _theme_hsl_draft(self._ui_theme_draft)
+                hue, saturation, lightness = self._ui_theme_hsl_draft[field]
+                component = HSL_COMPONENTS[self._ui_theme_component]
+                step = {"LEFT": -1.0, "RIGHT": 1.0, "PAGEUP": 10.0, "PAGEDOWN": -10.0}[key]
+                if component == "H":
+                    hue = (hue + step) % 360.0
+                elif component == "S":
+                    saturation = max(0.0, min(100.0, saturation + step))
+                else:
+                    lightness = max(0.0, min(100.0, lightness + step))
+                self._ui_theme_hsl_draft[field] = (hue, saturation, lightness)
+                self._ui_theme_draft[field] = _hsl_to_xterm_index(hue, saturation, lightness)
                 self.dirty = True; return False
             if key in ("s", "S"):
                 _save_theme_draft(self); self.dirty = True; return False
@@ -1180,29 +1481,64 @@ def _install_app_features() -> None:
         return original_handle_input(self, event)
 
     def handle_mouse(self, event) -> None:
-        # Drag motion and release are selection-only events. Do not feed them to
-        # the compatibility click handler: that path marks the whole frame dirty
-        # on every left-button event and would reintroduce visible drag flicker.
-        if getattr(event, "button", None) == "left" and getattr(event, "motion", False):
-            if getattr(event, "pressed", False):
-                _extend_mouse_selection(self, event)
+        button = getattr(event, "button", None)
+        pressed = bool(getattr(event, "pressed", False))
+        motion = bool(getattr(event, "motion", False))
+
+        # Some terminals encode held-left motion as button 0, others use the
+        # legacy low bits 3. Track the press state ourselves and accept either
+        # form, so a real drag is not dependent on one emulator's encoding.
+        if motion:
+            if self._left_button_down:
+                if isinstance(self._mouse_drag_selection, dict):
+                    _extend_mouse_selection(self, event)
+                else:
+                    _start_mouse_character_drag(self, event)
             return None
-        if getattr(event, "button", None) == "left" and not getattr(event, "pressed", False):
-            _finish_mouse_selection(self)
+
+        if not pressed and button in {"left", "release", "other"}:
+            if self._left_button_down:
+                if isinstance(self._mouse_drag_selection, dict):
+                    _extend_mouse_selection(self, event)
+                    _finish_mouse_selection(self)
+                elif isinstance(self._mouse_press_candidate, dict):
+                    anchor_xy = self._mouse_press_candidate.get("xy")
+                    if anchor_xy != (event.x, event.y) and _start_mouse_character_drag(self, event):
+                        _finish_mouse_selection(self)
+                self._left_button_down = False
+                self._mouse_press_candidate = None
             return None
 
         result = original_handle_mouse(self, event)
-        if getattr(event, "button", None) != "left":
+        if button != "left" or not pressed:
             return result
+
+        self._left_button_down = True
 
         target = self._pane_at(event.x, event.y)
         if target is None:
+            self._mouse_press_candidate = None
             return result
         # A normal click in another pane makes that pane the sole possible
         # selection owner. The existing selection survives clicks inside its
         # own pane until a new selection starts.
         pane = self.stream if target == -1 else self.panes[target]
         _clear_other_selections(self, pane)
+        rect = next((rect for index, rect in self.last_rects if index == target), None)
+        point = _mouse_point(self, event, target, pane, rect) if rect is not None else None
+        if point is None:
+            self._mouse_press_candidate = None
+        else:
+            mode, _visual, visual_index, full_column, _plain, table = point
+            self._mouse_press_candidate = {
+                "target": target,
+                "pane": pane,
+                "mode": mode,
+                "anchor_visual": visual_index,
+                "anchor_col": full_column,
+                "table": table,
+                "xy": (event.x, event.y),
+            }
 
         now = time.monotonic()
         same_target = target == self._last_left_click_target
@@ -1217,7 +1553,6 @@ def _install_app_features() -> None:
             return result
 
         self._last_left_click_time = 0.0
-        rect = next((rect for index, rect in self.last_rects if index == target), None)
         if rect is None:
             return result
         _start_mouse_word_selection(self, event, target, pane, rect)

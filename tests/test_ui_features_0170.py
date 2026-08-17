@@ -16,8 +16,11 @@ from htail_app.ui_features import (
     SCROLLBAR_STYLES,
     _apply_scrollbar_style,
     _directional_neighbor,
+    _hsl_square,
+    _hsl_to_xterm_index,
     _scrollbar_geometry,
     _selection_word,
+    _xterm_index_to_hsl,
     current_palette,
     current_scrollbar_style,
 )
@@ -121,12 +124,19 @@ class UIFeatures0170Tests(unittest.TestCase):
         self.assertEqual(parse_escape_sequence("\x1b[1;3D"), "ALT_LEFT")
 
     def test_mouse_button_motion_is_enabled_and_decoded(self):
+        self.assertIn("?1000h", MOUSE_ENABLE)
         self.assertIn("?1002h", MOUSE_ENABLE)
         event = parse_escape_sequence("\x1b[<32;10;5M")
         self.assertIsInstance(event, MouseEvent)
         self.assertEqual(event.button, "left")
         self.assertTrue(event.pressed)
         self.assertTrue(event.motion)
+        legacy_motion = parse_escape_sequence("\x1b[<35;10;5M")
+        self.assertEqual(legacy_motion.button, "motion")
+        self.assertTrue(legacy_motion.motion)
+        legacy_release = parse_escape_sequence("\x1b[<3;10;5m")
+        self.assertEqual(legacy_release.button, "release")
+        self.assertFalse(legacy_release.pressed)
 
     def test_directional_navigation_prefers_overlapping_neighbor(self):
         rects = [
@@ -245,6 +255,85 @@ class UIFeatures0170Tests(unittest.TestCase):
             finally:
                 application.close_native_watch()
 
+    def test_realistic_double_click_sequence_accepts_generic_drag_encoding(self):
+        with tempfile.TemporaryDirectory() as td:
+            application = self._app(Path(td), 2, "columns", color=True)
+            output = io.StringIO()
+            try:
+                with mock.patch("sys.stdout", output):
+                    application.render()
+                first_rect = next(rect for index, rect in application.last_rects if index == 0)
+                pane = application.panes[0]
+                pane.scroll("HOME", max(1, first_rect.height - 2))
+                application.dirty = True
+                with mock.patch("sys.stdout", output):
+                    application.render()
+                x1, y = first_rect.x + 2, first_rect.y + 1
+                x2 = first_rect.x + 10
+                events = [
+                    MouseEvent(x1, y, "left", True),
+                    MouseEvent(x1, y, "release", False),
+                    MouseEvent(x1, y, "left", True),
+                    MouseEvent(x2, y, "motion", True, True),
+                    MouseEvent(x2, y, "release", False),
+                ]
+                with mock.patch("htail_app.ui_features._osc52_copy") as copy:
+                    for event in events:
+                        application.handle_input(event)
+                self.assertEqual(copy.call_args_list[-1], mock.call("alpha beta"))
+                self.assertEqual(pane._mouse_selection.text, "alpha beta")
+                self.assertFalse(application._left_button_down)
+            finally:
+                application.close_native_watch()
+
+    def test_double_click_drag_finishes_from_release_coordinates_without_motion(self):
+        with tempfile.TemporaryDirectory() as td:
+            application = self._app(Path(td), 1, "columns", color=True)
+            output = io.StringIO()
+            try:
+                with mock.patch("sys.stdout", output):
+                    application.render()
+                rect = next(rect for index, rect in application.last_rects if index == 0)
+                pane = application.panes[0]
+                pane.scroll("HOME", max(1, rect.height - 2))
+                application.dirty = True
+                with mock.patch("sys.stdout", output):
+                    application.render()
+                x1, y = rect.x + 2, rect.y + 1
+                x2 = rect.x + 10
+                with mock.patch("htail_app.ui_features._osc52_copy") as copy:
+                    application.handle_input(MouseEvent(x1, y, "left", True))
+                    application.handle_input(MouseEvent(x1, y, "release", False))
+                    application.handle_input(MouseEvent(x1, y, "left", True))
+                    application.handle_input(MouseEvent(x2, y, "release", False))
+                self.assertEqual(copy.call_args_list[-1], mock.call("alpha beta"))
+                self.assertEqual(pane._mouse_selection.text, "alpha beta")
+            finally:
+                application.close_native_watch()
+
+    def test_plain_character_drag_selects_when_double_click_is_not_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            application = self._app(Path(td), 1, "columns", color=True)
+            output = io.StringIO()
+            try:
+                with mock.patch("sys.stdout", output):
+                    application.render()
+                rect = next(rect for index, rect in application.last_rects if index == 0)
+                pane = application.panes[0]
+                pane.scroll("HOME", max(1, rect.height - 2))
+                application.dirty = True
+                with mock.patch("sys.stdout", output):
+                    application.render()
+                y = rect.y + 1
+                with mock.patch("htail_app.ui_features._osc52_copy") as copy:
+                    application.handle_input(MouseEvent(rect.x + 1, y, "left", True))
+                    application.handle_input(MouseEvent(rect.x + 5, y, "motion", True, True))
+                    application.handle_input(MouseEvent(rect.x + 5, y, "release", False))
+                self.assertEqual(pane._mouse_selection.text, "alpha")
+                copy.assert_called_once_with("alpha")
+            finally:
+                application.close_native_watch()
+
     def test_palette_editor_accepts_coalesced_arrow_input(self):
         with tempfile.TemporaryDirectory() as td:
             application = self._app(Path(td), 1, "columns")
@@ -259,16 +348,57 @@ class UIFeatures0170Tests(unittest.TestCase):
             finally:
                 application.close_native_watch()
 
-    def test_command_palette_exposes_scrollbar_style_cycle(self):
+    def test_command_palette_opens_scrollbar_style_picker(self):
         with tempfile.TemporaryDirectory() as td:
             application = self._app(Path(td), 1, "columns")
             try:
                 application.palette_mode = "commands"
-                labels = [item.label for item in application._palette_all_items()]
-                self.assertTrue(any(label.startswith("Scrollbar style: ") for label in labels))
+                items = application._palette_all_items()
+                style_index = next(index for index, item in enumerate(items) if item.action == "scrollbar-styles")
+                application.palette_active = True
+                application.palette_items = items
+                application.palette_selected = style_index
+                application._execute_palette_item()
+                self.assertEqual(application.palette_mode, "scrollbar-styles")
+                self.assertEqual(tuple(str(item.value) for item in application.palette_items), SCROLLBAR_STYLES)
                 self.assertEqual(SCROLLBAR_STYLES, ("rail", "border", "minimal", "off"))
             finally:
                 application.close_native_watch()
+
+    def test_palette_editor_uses_hsl_controls_and_colour_field(self):
+        with tempfile.TemporaryDirectory() as td:
+            application = self._app(Path(td), 1, "columns", color=True)
+            try:
+                application.palette_active = True
+                application.palette_mode = "ui-theme-editor"
+                application._ui_theme_draft = current_palette()
+                application._ui_theme_hsl_draft = {
+                    field: _xterm_index_to_hsl(value)
+                    for field, value in application._ui_theme_draft.items()
+                }
+                application._ui_theme_draft_name = "test"
+                application._ui_theme_field = 0
+                application._ui_theme_component = 0
+                before_hue = application._ui_theme_hsl_draft["accent"][0]
+                application.handle_input("RIGHT")
+                after_hue = application._ui_theme_hsl_draft["accent"][0]
+                self.assertAlmostEqual((after_hue - before_hue) % 360.0, 1.0)
+                rendered = "\n".join(core.strip_ansi(row) for row in application._palette_lines(120, 24))
+                self.assertIn("Saturation", rendered)
+                self.assertIn("Lightness", rendered)
+                self.assertIn("xterm-256 index", rendered)
+            finally:
+                application.close_native_watch()
+
+    def test_hsl_helpers_quantize_to_xterm_palette(self):
+        hue, saturation, lightness = _xterm_index_to_hsl(51)
+        self.assertTrue(0.0 <= hue < 360.0)
+        self.assertTrue(0.0 <= saturation <= 100.0)
+        self.assertTrue(0.0 <= lightness <= 100.0)
+        self.assertTrue(0 <= _hsl_to_xterm_index(210.0, 75.0, 50.0) <= 255)
+        square = _hsl_square(210.0, 75.0, 50.0, color=False, width=12, rows=4)
+        self.assertEqual(len(square), 4)
+        self.assertTrue(all(len(row) == 12 for row in square))
 
     def test_word_selection_supports_paths_and_identifiers(self):
         text = "error src/foo-bar.py:reviewer next"
