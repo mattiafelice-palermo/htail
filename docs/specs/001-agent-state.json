@@ -7,10 +7,8 @@
     "001"
   ],
   "turn": "REVIEWER",
-  "action": "FINAL_REVIEW",
-  "findings": [
-    "R7"
-  ],
-  "resume_review": "FINAL_REVIEW",
-  "updated_at": "2026-08-19T00:29:17+02:00"
+  "action": "COMPLETE",
+  "findings": [],
+  "resume_review": null,
+  "updated_at": "2026-08-19T00:33:16+02:00"
 }
