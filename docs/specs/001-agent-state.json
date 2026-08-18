@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "spec": "001",
+  "branch": "feature/0.17.3-safe-non-text-terminal-rendering",
+  "active_child": "001",
+  "children": [
+    "001"
+  ],
+  "turn": "IMPLEMENTER",
+  "action": "IMPLEMENT",
+  "findings": [],
+  "resume_review": null,
+  "updated_at": "2026-08-18T20:39:37+00:00"
+}
