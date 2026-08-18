@@ -8,6 +8,7 @@ import time
 from typing import List, Optional, Sequence, Tuple
 
 from . import core
+from .text_safety import inspect_file, warning_for
 
 
 ACTIVE_CONTENT_VERIFY_INTERVAL = 0.50
@@ -42,6 +43,7 @@ class WatchNotice:
     kind: str  # initial, missing, resumed, ended, error
     text: str = ""
     initial_tail: Optional[List[str]] = None
+    warning: Optional[str] = None
 
 
 def analyze_changes(old: Sequence[str], new: Sequence[str]) -> DiffAnalysis:
@@ -200,6 +202,12 @@ class FileFollower:
         if not self.path.exists():
             return None
         try:
+            inspection = inspect_file(self.path, self.args.encoding)
+            safety_warning = (
+                warning_for(self.path, self.args.encoding, inspection)
+                if inspection is not None and inspection.suspicious
+                else None
+            )
             previous = core.read_lines(self.path, self.args.encoding)
             if self.args.lines is None:
                 initial_tail = list(previous)
@@ -216,7 +224,11 @@ class FileFollower:
         self._notification_hint = False
         resumed = self.file_missing
         self.file_missing = False
-        return WatchNotice("resumed" if resumed else "initial", initial_tail=initial_tail)
+        return WatchNotice(
+            "resumed" if resumed else "initial",
+            initial_tail=initial_tail,
+            warning=safety_warning,
+        )
 
     def _make_update(self, analysis: DiffAnalysis, now: float) -> Optional[WatchUpdate]:
         if not analysis.events:

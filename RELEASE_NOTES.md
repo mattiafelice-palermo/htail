@@ -1,3 +1,14 @@
+# htail 0.17.3
+
+## New features
+
+- Local files are sampled by content using the selected encoding. Suspicious binary-like sources now require explicit confirmation in interactive mode and emit a stderr warning in non-interactive mode.
+- Unicode rendering now measures terminal cells for ANSI-aware clipping, wrapping, horizontal scrolling, tab expansion, and pane geometry.
+
+## Bug fixes
+
+- Untrusted source control characters are rendered as visible text, so file contents cannot execute terminal escape sequences or corrupt the surrounding interface.
+
 # htail 0.17.2
 
 ## New features

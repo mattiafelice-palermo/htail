@@ -71,6 +71,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Pattern, Sequence, Tuple
 
+from .text_safety import sanitize_source_line
+
 
 # ---------------------------------------------------------------------------
 # ANSI / colour helpers
@@ -1757,9 +1759,10 @@ def format_update_header(
 def render_initial_lines(
     lines: Sequence[str], highlighter: SyntaxHighlighter
 ) -> List[str]:
+    safe_lines = [sanitize_source_line(line) for line in lines]
     if highlighter.enabled:
-        return highlighter.render_lines(lines)
-    return [line.rstrip("\r\n") for line in lines]
+        return highlighter.render_lines(safe_lines)
+    return [line.rstrip("\r\n") for line in safe_lines]
 
 
 def render_event_lines(
@@ -1778,14 +1781,19 @@ def render_event_lines(
         if kind == "delete":
             for line in lines:
                 rendered.append(
-                    paint("- " + line.rstrip("\r\n"), BOLD_RED, color)
+                    paint(
+                        "- " + sanitize_source_line(line).rstrip("\r\n"),
+                        BOLD_RED,
+                        color,
+                    )
                 )
             continue
 
-        raw_lines = [line.rstrip("\r\n") for line in lines]
+        safe_lines = [sanitize_source_line(line) for line in lines]
+        raw_lines = [line.rstrip("\r\n") for line in safe_lines]
 
         if highlighter.enabled:
-            styled_lines = highlighter.render_lines(lines)
+            styled_lines = highlighter.render_lines(safe_lines)
             marker = "~ " if kind == "replace" and mark_replacements else "▌ "
             marker = paint(marker, BOLD_LIGHT_CYAN, color)
             for styled in styled_lines:
@@ -2369,6 +2377,8 @@ class TerminalUI:
         self, title: str, content: Sequence[str], width: int, body_height: int
     ) -> List[str]:
         """Render a centered bordered panel inside the terminal viewport."""
+        from .terminal_cells import display_width
+
         if width < 34:
             return [clip_ansi(line, width) for line in content[:body_height]]
         panel_width = min(88, max(34, width - 6))
@@ -2380,7 +2390,7 @@ class TerminalUI:
         if len(rendered) > limit:
             rendered = rendered[: limit - 1] + [paint("… more release notes omitted", DIM, self.color)]
         label = f" {title} "
-        dashes = max(0, panel_width - 2 - len(label))
+        dashes = max(0, panel_width - 2 - display_width(label))
         top = "╭" + "─" * (dashes // 2) + label + "─" * (dashes - dashes // 2) + "╮"
         bottom = "╰" + "─" * (panel_width - 2) + "╯"
         if self.color:
@@ -2388,7 +2398,7 @@ class TerminalUI:
             bottom = paint(bottom, BOLD_LIGHT_CYAN, True)
         panel = [top]
         for line in rendered:
-            padded = line + " " * max(0, inner_width - len(strip_ansi(line)))
+            padded = line + " " * max(0, inner_width - display_width(line))
             panel.append(f"{paint('│', CYAN, self.color)} {padded} {paint('│', CYAN, self.color)}")
         panel.append(bottom)
         indent = " " * max(0, (width - panel_width) // 2)

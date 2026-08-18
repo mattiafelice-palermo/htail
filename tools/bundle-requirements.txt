@@ -3,3 +3,4 @@
 # resolves and bundles their wheel dependencies for every supported ABI.
 Pygments==2.20.0
 RapidFuzz==3.14.5
+wcwidth==0.2.13

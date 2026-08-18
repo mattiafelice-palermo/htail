@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Pattern, Sequence, Tuple
 from . import core
 from .extras import linkify_urls
 from .searching import SEARCH_BOOLEAN, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label, simple_escape
+from . import terminal_cells
+from .text_safety import sanitize_source_line
 
 
 FOLLOW_CHANGES = "changes"
@@ -25,11 +27,7 @@ class PaneUpdate:
 
 
 def _pad_ansi(text: str, width: int) -> str:
-    text = core.clip_ansi(text, max(0, width))
-    visible = len(core.strip_ansi(text))
-    if visible < width:
-        text += " " * (width - visible)
-    return text
+    return terminal_cells.pad_cells_ansi(text, max(0, width))
 
 
 def _inject_regex_style(text: str, pattern: Optional[Pattern[str]], on: str, off: str) -> str:
@@ -225,16 +223,17 @@ class Pane:
         return list(wrapped)
 
     def _render_snapshot_lines(self, raw_visible: Sequence[str]) -> List[str]:
+        safe_visible = [sanitize_source_line(line) for line in raw_visible]
         if not self.highlighter.enabled:
-            return [line.rstrip("\r\n") for line in raw_visible]
+            return [line.rstrip("\r\n") for line in safe_visible]
         if self.highlighter.mode == "markdown-rendered":
             fence_re = re.compile(r"^\s*(?:```|~~~)")
             if (
-                not any(fence_re.match(line.rstrip("\r\n")) for line in raw_visible)
-                and not self.highlighter._contains_markdown_table(raw_visible)
+                not any(fence_re.match(line.rstrip("\r\n")) for line in safe_visible)
+                and not self.highlighter._contains_markdown_table(safe_visible)
             ):
                 rendered: List[str] = []
-                for raw in raw_visible:
+                for raw in safe_visible:
                     body = raw.rstrip("\r\n")
                     cached = self._render_cache.get(body)
                     if cached is None:
@@ -244,7 +243,7 @@ class Pane:
                         self._render_cache.move_to_end(body)
                     rendered.append(cached)
                 return rendered
-        return self.highlighter.render_lines(raw_visible)
+        return self.highlighter.render_lines(safe_visible)
 
     @staticmethod
     def _is_markdown_table_visual(text: str) -> bool:
@@ -261,16 +260,7 @@ class Pane:
 
     @staticmethod
     def _slice_ansi(text: str, start: int, width: int) -> str:
-        if start <= 0:
-            return core.clip_ansi(text, width)
-        visible = 0
-        raw = 0
-        while raw < len(text) and visible < start:
-            match = core.ANSI_RE.match(text, raw)
-            if match:
-                raw = match.end(); continue
-            raw += 1; visible += 1
-        return core.clip_ansi(text[raw:], width)
+        return terminal_cells.slice_cells_ansi(text, start, width)
 
     def _viewport_row(self, row: str, width: int) -> str:
         if self.horizontal_offset and (
@@ -286,7 +276,7 @@ class Pane:
         digits = max(1, len(str(max(1, total))))
         first = f"{number:>{digits}} │ " if number is not None else (" " * digits + " │ ")
         cont = " " * digits + " │ "
-        content_width = max(1, width - len(first))
+        content_width = max(1, width - terminal_cells.display_width(first))
         pieces = self._wrap_cached(row, content_width)
         return [core.paint(first if i == 0 else cont, core.DIM, self.color) + piece for i, piece in enumerate(pieces)]
 
@@ -856,7 +846,7 @@ class Pane:
                 return
         target = max(0, self.horizontal_offset + delta)
         if width is not None:
-            max_width = max((len(core.strip_ansi(row)) for row in rows), default=0)
+            max_width = max((terminal_cells.display_width(row) for row in rows), default=0)
             target = min(target, max(0, max_width - max(1, width)))
         self.horizontal_offset = target
 
@@ -1083,7 +1073,7 @@ class Pane:
             self._snapshot_top = min(max(0, self._snapshot_top), self._snapshot_max_top(body_h))
         title = self.title(index, max(1, width - 4), focused, body_h)
         title = core.clip_ansi(title, max(1, width - 4))
-        visible = len(core.strip_ansi(title))
+        visible = terminal_cells.display_width(title)
         remaining = max(1, width - 3 - visible)
         top_plain = "╭─" + core.strip_ansi(title) + "─" * remaining + "╮"
         if self.color:
@@ -1103,7 +1093,7 @@ class Pane:
         _, below = self._viewport_counts(body_h)
         if below:
             indicator = f" ↓{below} more "
-            fill = max(0, width - 2 - len(indicator))
+            fill = max(0, width - 2 - terminal_cells.display_width(indicator))
             if self.color:
                 bottom = (
                     core.paint("╰" + "─" * fill, border_style, True)

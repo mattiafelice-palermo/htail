@@ -17,6 +17,7 @@ import urllib.request
 
 from . import VERSION
 from . import core
+from . import terminal_cells
 from .input import InputReader, InputEvent, MouseEvent
 from .fsnotify import FsEvents, NativeWatchHub
 from .globwatch import DynamicGlob, has_magic
@@ -27,6 +28,7 @@ from .global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, fuzzy_backen
 from .git_remote import GitFileContext, GitRemoteFollower, GitRemoteRef, discover_git_file, list_remote_refs
 from .searching import GlobalSearchMatch, SEARCH_BOOLEAN, SEARCH_FUZZY, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label, simple_escape
 from .sources import CommandFollower, CompressedFollower, SSHFollower, StreamFollower
+from .text_safety import inspect_file, warning_for
 from .watcher import FileFollower, WatchNotice, WatchUpdate
 
 # The reusable core is copied from the previous single-file implementation.
@@ -240,30 +242,47 @@ def maybe_offer_self_install(args: argparse.Namespace, color: bool) -> None:
     print(core.paint(f"[htail] {message}", core.GREEN if ok else core.BOLD_YELLOW, color))
 
 
+def _confirm_initial_local_sources(args: argparse.Namespace) -> None:
+    """Filter suspicious direct files before the fullscreen UI is entered."""
+
+    kept: List[Path] = []
+    for path in args.files:
+        if (
+            str(path) == "-"
+            or has_magic(str(path))
+            or not path.exists()
+            or is_compressed_path(path)
+        ):
+            kept.append(path)
+            continue
+
+        inspection = inspect_file(path, args.encoding)
+        if inspection is None or not inspection.suspicious:
+            kept.append(path)
+            continue
+
+        warning = warning_for(path, args.encoding, inspection)
+        print(f"[htail] WARNING: {warning}", file=sys.stderr)
+        print("Open this source anyway? [y/N] ", end="", flush=True)
+        try:
+            answer = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+            print()
+        if answer in ("y", "yes"):
+            kept.append(path)
+        else:
+            print(f"[htail] not opening {path}", file=sys.stderr)
+
+    args.files = kept
+
+
 def _pad(text: str, width: int) -> str:
-    text = core.clip_ansi(text, max(0, width))
-    visible = len(core.strip_ansi(text))
-    return text + " " * max(0, width - visible)
+    return terminal_cells.pad_cells_ansi(text, max(0, width))
 
 
 def _slice_ansi(text: str, start: int, width: int) -> str:
-    plain = core.strip_ansi(text)
-    if width <= 0 or start >= len(plain):
-        return ""
-    if start <= 0:
-        clipped = core.clip_ansi(text, width)
-        return clipped
-    remainder = text
-    visible = 0
-    i = 0
-    while i < len(remainder) and visible < start:
-        match = core.ANSI_RE.match(remainder, i)
-        if match:
-            i = match.end()
-            continue
-        visible += 1
-        i += 1
-    return core.clip_ansi(remainder[i:], width)
+    return terminal_cells.slice_cells_ansi(text, start, width)
 
 
 def _dim_line(text: str, color: bool) -> str:
@@ -309,7 +328,7 @@ def _panel_geometry(
         rendered = rendered[: max(0, limit - 1)] + [core.paint("… more omitted", core.DIM, color)]
 
     label = f" {title} "
-    label_visible = len(label)
+    label_visible = terminal_cells.display_width(label)
     fill = max(0, panel_width - 2 - label_visible)
     left_fill = max(1, fill // 2)
     right_fill = max(1, fill - left_fill)
@@ -356,7 +375,7 @@ def _panel_lines(
     for i, row in enumerate(panel_rows[:height]):
         y = top_y + i
         if 0 <= y < height:
-            out[y] = (" " * left) + row + (" " * max(0, width - left - len(core.strip_ansi(row))))
+            out[y] = (" " * left) + row + (" " * max(0, width - left - terminal_cells.display_width(row)))
     if not color:
         out = [core.strip_ansi(row) for row in out]
     return out
@@ -377,12 +396,13 @@ def _overlay_modal(background: Sequence[str], panel: Sequence[str], width: int, 
             out.append(_dim_line(bg, color))
             continue
         plain_fg = core.strip_ansi(fg)
-        non_space = [i for i, ch in enumerate(plain_fg) if ch != ' ']
-        if not non_space:
+        if not plain_fg.strip():
             out.append(_dim_line(bg, color))
             continue
-        start = non_space[0]
-        end = non_space[-1] + 1
+        leading_chars = len(plain_fg) - len(plain_fg.lstrip())
+        trailing_chars = len(plain_fg.rstrip())
+        start = terminal_cells.display_width(plain_fg[:leading_chars])
+        end = terminal_cells.display_width(plain_fg[:trailing_chars])
         left = _slice_ansi(bg, 0, start)
         mid = _slice_ansi(fg, start, end - start)
         right = _slice_ansi(bg, end, max(0, width - end))
@@ -541,6 +561,8 @@ class MultiApp:
                 pane.waiting = True
                 if notice and notice.kind == "error":
                     pane.add_system_line(notice.text, warning=True)
+            if notice and notice.warning:
+                pane.add_system_line(notice.warning, warning=True)
             if highlighter.warning:
                 pane.add_system_line(highlighter.warning, warning=True)
             self.panes.append(pane)
@@ -588,6 +610,8 @@ class MultiApp:
             pane.waiting = True
             if notice and notice.kind == "error":
                 pane.add_system_line(notice.text, warning=True)
+        if notice and notice.warning:
+            pane.add_system_line(notice.warning, warning=True)
         if highlighter.warning:
             pane.add_system_line(highlighter.warning, warning=True)
         self.paths.append(path)
@@ -2309,6 +2333,8 @@ class MultiApp:
                 continue
             pane = self.panes[index]
             if isinstance(result, WatchNotice):
+                if result.warning:
+                    pane.add_system_line(result.warning, warning=True)
                 if result.kind in ("initial", "resumed") and result.initial_tail is not None:
                     pane.add_initial(result.initial_tail)
                     pane.set_snapshot(follower.previous)
@@ -2510,6 +2536,8 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
         panes.append(pane)
         followers.append(follower)
         if notice and notice.initial_tail is not None:
+            if notice.warning:
+                print(f"[htail] {notice.warning}", file=sys.stderr)
             if not args.no_start_banner:
                 print(f"[htail {VERSION}] [{len(panes)}] watching {pane.name} · syntax: {highlighter.syntax_name}")
             visible = [line for line in notice.initial_tail if display_filter.accepts(line)]
@@ -2561,8 +2589,11 @@ def run_noninteractive(args: argparse.Namespace, color: bool, display_filter: co
                 result = follower.poll(now)
                 if isinstance(result, WatchUpdate):
                     _render_stream_event(index, panes[index], result, args, display_filter, color)
-                elif isinstance(result, WatchNotice) and result.kind == "error":
-                    print(f"[htail] [{index + 1}] {result.text}", file=sys.stderr)
+                elif isinstance(result, WatchNotice):
+                    if result.warning:
+                        print(f"[htail] [{index + 1}] {result.warning}", file=sys.stderr)
+                    if result.kind == "error":
+                        print(f"[htail] [{index + 1}] {result.text}", file=sys.stderr)
             if followers and not glob_trackers and all(bool(getattr(follower, "finished", False)) for follower in followers):
                 return 0
     except KeyboardInterrupt:
@@ -2646,5 +2677,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     has_stdin_source = any(str(path) == "-" for path in args.files)
     interactive = sys.stdout.isatty() and (sys.stdin.isatty() or has_stdin_source or bool(args.commands) or bool(args.ssh_sources) or bool(args.globs))
     if interactive:
+        if sys.stdin.isatty():
+            _confirm_initial_local_sources(args)
+            if not args.files and not args.commands and not args.ssh_sources and not args.globs:
+                print("[htail] no files opened", file=sys.stderr)
+                return 0
         return run_interactive(args, color, display_filter, update_service)
     return run_noninteractive(args, color, display_filter)
