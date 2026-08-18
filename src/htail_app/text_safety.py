@@ -5,7 +5,7 @@ from __future__ import annotations
 import codecs
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 
 CLASSIFIER_SAMPLE_BYTES = 64 * 1024
@@ -176,6 +176,35 @@ def _visible_control(char: str) -> str:
     return char
 
 
+def _sanitize_display_char(char: str) -> str:
+    if char == "\n":
+        return "␊"
+    if char == "\r":
+        return "␍"
+    if char == "\t" or char.isprintable():
+        return char
+    return _visible_control(char)
+
+
+def sanitize_source_text_with_boundaries(text: str) -> Tuple[str, Tuple[int, ...]]:
+    """Return a safe display projection and raw-character boundaries.
+
+    The returned boundary tuple has one entry for every boundary in ``text``.
+    This lets display code translate canonical search spans without changing
+    the raw text used by search and filtering.
+    """
+
+    parts: List[str] = []
+    boundaries: List[int] = [0]
+    visible_length = 0
+    for char in text:
+        safe = _sanitize_display_char(char)
+        parts.append(safe)
+        visible_length += len(safe)
+        boundaries.append(visible_length)
+    return "".join(parts), tuple(boundaries)
+
+
 def sanitize_source_line(line: str) -> str:
     """Make one decoded source line safe to emit to a terminal.
 
@@ -191,16 +220,7 @@ def sanitize_source_line(line: str) -> str:
     elif body.endswith("\n") or body.endswith("\r"):
         body, terminator = body[:-1], body[-1:]
 
-    safe = "".join(
-        "␊"
-        if char == "\n"
-        else "␍"
-        if char == "\r"
-        else char
-        if char in "\t" or char.isprintable()
-        else _visible_control(char)
-        for char in body
-    )
+    safe, _ = sanitize_source_text_with_boundaries(body)
     return safe + terminator
 
 

@@ -242,37 +242,79 @@ def maybe_offer_self_install(args: argparse.Namespace, color: bool) -> None:
     print(core.paint(f"[htail] {message}", core.GREEN if ok else core.BOLD_YELLOW, color))
 
 
+def _open_confirmation_stream():
+    """Return an interactive confirmation stream without consuming a source pipe."""
+
+    if sys.stdin.isatty():
+        return sys.stdin, False
+    candidates = ["CONIN$"] if os.name == "nt" else []
+    try:
+        candidates.append(os.ctermid())
+    except (AttributeError, OSError):
+        pass
+    if os.name != "nt":
+        candidates.append("/dev/tty")
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return open(candidate, "r", encoding="utf-8", errors="replace"), True
+        except (OSError, ValueError):
+            continue
+    return None, False
+
+
 def _confirm_initial_local_sources(args: argparse.Namespace) -> None:
     """Filter suspicious direct files before the fullscreen UI is entered."""
 
     kept: List[Path] = []
-    for path in args.files:
-        if (
-            str(path) == "-"
-            or has_magic(str(path))
-            or not path.exists()
-            or is_compressed_path(path)
-        ):
-            kept.append(path)
-            continue
+    confirmation_stream = None
+    close_confirmation_stream = False
+    try:
+        for path in args.files:
+            if (
+                str(path) == "-"
+                or has_magic(str(path))
+                or not path.exists()
+                or is_compressed_path(path)
+            ):
+                kept.append(path)
+                continue
 
-        inspection = inspect_file(path, args.encoding)
-        if inspection is None or not inspection.suspicious:
-            kept.append(path)
-            continue
+            inspection = inspect_file(path, args.encoding)
+            if inspection is None or not inspection.suspicious:
+                kept.append(path)
+                continue
 
-        warning = warning_for(path, args.encoding, inspection)
-        print(f"[htail] WARNING: {warning}", file=sys.stderr)
-        print("Open this source anyway? [y/N] ", end="", flush=True)
-        try:
-            answer = input().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
-            print()
-        if answer in ("y", "yes"):
-            kept.append(path)
-        else:
-            print(f"[htail] not opening {path}", file=sys.stderr)
+            warning = warning_for(path, args.encoding, inspection)
+            print(f"[htail] WARNING: {warning}", file=sys.stderr)
+            if confirmation_stream is None and not close_confirmation_stream:
+                confirmation_stream, close_confirmation_stream = _open_confirmation_stream()
+            if confirmation_stream is None:
+                print(
+                    f"[htail] no controlling terminal is available; not opening {path}",
+                    file=sys.stderr,
+                )
+                continue
+            print("Open this source anyway? [y/N] ", end="", flush=True)
+            try:
+                if confirmation_stream is sys.stdin:
+                    answer = input().strip().lower()
+                else:
+                    answer = confirmation_stream.readline().strip().lower()
+            except (EOFError, KeyboardInterrupt, OSError):
+                answer = ""
+                print()
+            if answer in ("y", "yes"):
+                kept.append(path)
+            else:
+                print(f"[htail] not opening {path}", file=sys.stderr)
+    finally:
+        if close_confirmation_stream and confirmation_stream is not None:
+            try:
+                confirmation_stream.close()
+            except OSError:
+                pass
 
     args.files = kept
 
@@ -2677,10 +2719,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     has_stdin_source = any(str(path) == "-" for path in args.files)
     interactive = sys.stdout.isatty() and (sys.stdin.isatty() or has_stdin_source or bool(args.commands) or bool(args.ssh_sources) or bool(args.globs))
     if interactive:
-        if sys.stdin.isatty():
-            _confirm_initial_local_sources(args)
-            if not args.files and not args.commands and not args.ssh_sources and not args.globs:
-                print("[htail] no files opened", file=sys.stderr)
-                return 0
+        _confirm_initial_local_sources(args)
+        if not args.files and not args.commands and not args.ssh_sources and not args.globs:
+            print("[htail] no files opened", file=sys.stderr)
+            return 0
         return run_interactive(args, color, display_filter, update_service)
     return run_noninteractive(args, color, display_filter)

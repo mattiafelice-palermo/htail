@@ -3,12 +3,15 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 from htail_app import app, core, terminal_cells
 from htail_app.app import MultiApp, parse_args
+from htail_app.global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, render_global_search, search_corpus
 from htail_app.pane import Pane
+from htail_app.searching import GlobalSearchMatch, SEARCH_SIMPLE
 from htail_app.text_safety import (
     CLASSIFIER_SAMPLE_BYTES,
     inspect_bytes,
@@ -96,7 +99,12 @@ class TerminalSafetyTests(unittest.TestCase):
             path.write_bytes(b"%PDF-1.7\n" + bytes(range(256)) * 8)
             args = Namespace(files=[path], encoding="utf-8")
             output = StringIO()
-            with mock.patch("builtins.input", return_value=""), redirect_stderr(output), redirect_stdout(output):
+            with (
+                mock.patch("builtins.input", return_value=""),
+                mock.patch.object(app, "_open_confirmation_stream", return_value=(None, False)),
+                redirect_stderr(output),
+                redirect_stdout(output),
+            ):
                 app._confirm_initial_local_sources(args)
         self.assertEqual(args.files, [])
         self.assertIn("not opening", output.getvalue())
@@ -122,6 +130,23 @@ class TerminalCellGeometryTests(unittest.TestCase):
         self.assertEqual(terminal_cells.display_width(styled), 6)
         self.assertEqual(terminal_cells.display_width(core.clip_ansi(styled, 6)), 6)
 
+    def test_complex_emoji_sequences_use_one_consistent_cell_model(self):
+        for sequence in ("👩\u200d💻", "☕️"):
+            with self.subTest(sequence=sequence):
+                width = terminal_cells.display_width(sequence)
+                self.assertGreater(width, 0)
+                self.assertEqual(width, terminal_cells.display_width(core.clip_ansi(sequence, width)))
+                self.assertEqual(width, terminal_cells.display_width(terminal_cells.slice_cells_ansi(sequence, 0, width)))
+                self.assertEqual(width, terminal_cells.display_width(terminal_cells.pad_cells_ansi(sequence, width)))
+                wrapped = core.wrap_ansi(sequence, width)
+                self.assertEqual([terminal_cells.display_width(row) for row in wrapped], [width])
+
+    def test_complex_emoji_near_pane_clipping_keeps_borders_exact(self):
+        pane = self.make_pane(Path("emoji.txt"))
+        pane.add_initial(["left " + "👩\u200d💻" + " right\n"])
+        rows = [core.strip_ansi(row) for row in pane.render_box(20, 8, True, 0)]
+        self.assertTrue(all(terminal_cells.display_width(row) == 20 for row in rows))
+
     def test_wide_source_keeps_one_pane_border_at_exact_width(self):
         pane = self.make_pane(Path("unicode.txt"))
         pane.add_initial(["A界e\u0301🙂 mixed text\n"])
@@ -146,6 +171,122 @@ class TerminalCellGeometryTests(unittest.TestCase):
                     instance.close_native_watch()
                 self.assertTrue(all(terminal_cells.display_width(row) == 80 for row in rows))
 
+
+class GlobalSearchSafetyAndGeometryTests(unittest.TestCase):
+    @staticmethod
+    def _render(results, panes, *, sort_mode=SORT_RELEVANCE, color=False, hscroll=0):
+        return render_global_search(
+            140,
+            32,
+            query="needle",
+            mode=SEARCH_SIMPLE,
+            mode_labels=((SEARCH_SIMPLE, "Simple"),),
+            ignore_case=False,
+            sort_mode=sort_mode,
+            file_filter_label="[All files]",
+            results=results,
+            selected=0,
+            truncated=False,
+            error=None,
+            panes=panes,
+            preview_enabled=True,
+            color=color,
+            preview_wrap=False,
+            preview_hscroll=hscroll,
+        )
+
+    def test_global_search_sanitizes_display_but_searches_canonical_text(self):
+        raw = "prefix needle " + chr(0x1B) + "[2J" + chr(0x07) + chr(0x81) + " 界e\u0301🙂 suffix"
+        pane = SimpleNamespace(
+            name="report" + chr(0x1B) + "[31m.log",
+            snapshot_raw=[raw + "\n"],
+            display_filter=core.DisplayFilter(),
+        )
+        corpus = build_corpus([pane])
+        self.assertEqual(corpus[0].text, raw)
+        page = search_corpus(
+            corpus,
+            "needle",
+            SEARCH_SIMPLE,
+            0,
+            file_filter=None,
+            sort_mode=SORT_RELEVANCE,
+            limit=10,
+        )
+        self.assertEqual(len(page.results), 1)
+        self.assertEqual(page.results[0].text, raw)
+
+        rows = self._render(page.results, [pane], color=True)
+        rendered = "\n".join(rows)
+        self.assertNotIn(chr(0x1B) + "[2J", rendered)
+        self.assertNotIn(chr(0x07), rendered)
+        self.assertIn("␛[2J", rendered)
+        self.assertIn("␇", rendered)
+        self.assertIn("\\x81", rendered)
+        self.assertIn("needle", rendered)
+        self.assertIn("\x1b[1;30;48;5;208m", rendered)
+
+    def test_global_search_rows_are_cell_exact_for_wide_and_combining_source(self):
+        text = "界e\u0301🙂 needle " + ("context " * 12)
+        pane = SimpleNamespace(
+            name="界🙂.log",
+            snapshot_raw=[text + "\n"],
+            display_filter=core.DisplayFilter(),
+        )
+        result = GlobalSearchMatch(
+            0, 0, pane.name, text, text.index("needle"), text.index("needle") + len("needle"), None
+        )
+        for sort_mode in (SORT_RELEVANCE, SORT_FILE):
+            with self.subTest(sort_mode=sort_mode):
+                rows = self._render([result], [pane], sort_mode=sort_mode, hscroll=5)
+                self.assertTrue(all(terminal_cells.display_width(row) == 140 for row in rows))
+
+
+class InteractiveConfirmationTests(unittest.TestCase):
+    class _PipeInput(StringIO):
+        def isatty(self):
+            return False
+
+    class _TerminalOutput(StringIO):
+        def isatty(self):
+            return True
+
+    def test_pipe_driven_interactive_startup_fails_closed_without_confirmation_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "binary.log"
+            path.write_bytes(b"%PDF-1.7\n" + bytes(range(256)) * 8)
+            captured = {}
+            stdin = self._PipeInput("source from pipe\n")
+            stdout = self._TerminalOutput()
+            stderr = StringIO()
+
+            def run_interactive(args, *_args):
+                captured["files"] = list(args.files)
+                return 0
+
+            with (
+                mock.patch.object(app.sys, "stdin", stdin),
+                mock.patch.object(app.sys, "stdout", stdout),
+                mock.patch.object(app.sys, "stderr", stderr),
+                mock.patch.object(app, "_open_confirmation_stream", return_value=(None, False)),
+                mock.patch.object(app, "run_interactive", side_effect=run_interactive),
+            ):
+                result = app.main(
+                    [
+                        str(path),
+                        "-",
+                        "--no-color",
+                        "--syntax",
+                        "none",
+                        "--no-install-prompt",
+                        "--no-self-install-prompt",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        self.assertIn(Path("-"), captured["files"])
+        self.assertNotIn(path, captured["files"])
+        self.assertIn("no controlling terminal", stderr.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

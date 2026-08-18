@@ -6,11 +6,13 @@ import re
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from . import core
+from . import terminal_cells
 from .searching import (
     GlobalSearchMatch,
     SEARCH_FUZZY,
     compile_search,
 )
+from .text_safety import sanitize_source_text_with_boundaries
 
 SORT_FILE = "file"
 SORT_RELEVANCE = "relevance"
@@ -39,6 +41,87 @@ class SearchPage:
     results: List[GlobalSearchMatch]
     truncated: bool = False
     error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _DisplayProjection:
+    text: str
+    raw_boundaries: Tuple[int, ...]
+
+    def span(self, start: int, end: int) -> Tuple[int, int]:
+        start = max(0, min(int(start), len(self.raw_boundaries) - 1))
+        end = max(start, min(int(end), len(self.raw_boundaries) - 1))
+        return self.raw_boundaries[start], self.raw_boundaries[end]
+
+
+def _source_projection(text: str) -> _DisplayProjection:
+    safe, safe_boundaries = sanitize_source_text_with_boundaries(text)
+    expanded, expanded_boundaries = terminal_cells.expand_tabs_ansi_with_boundaries(
+        safe, tuple(range(len(safe) + 1))
+    )
+    return _DisplayProjection(
+        expanded,
+        tuple(expanded_boundaries[offset] for offset in safe_boundaries),
+    )
+
+
+def _display_name(text: str) -> str:
+    return _source_projection(text).text
+
+
+def _crop_display_projection(
+    projection: _DisplayProjection,
+    match_start: int,
+    match_end: int,
+    width: int,
+) -> Tuple[str, int, int]:
+    """Crop a projected source line to cells while retaining a match span."""
+
+    if width <= 0:
+        return "", 0, 0
+    text = projection.text
+    if terminal_cells.display_width(text) <= width:
+        return text, match_start, match_end
+
+    boundaries = terminal_cells.cell_boundaries(text)
+    total = boundaries[-1]
+    anchor = boundaries[max(0, min(match_start, len(text)))]
+    left_cell = max(0, min(anchor - width // 3, total - width))
+    return _slice_display_span(text, left_cell, width, match_start, match_end)
+
+
+def _slice_display_span(
+    text: str,
+    left_cell: int,
+    width: int,
+    match_start: int,
+    match_end: int,
+) -> Tuple[str, int, int]:
+    first, last = terminal_cells.cell_slice_bounds(text, left_cell, width)
+    if last <= first:
+        return "", 0, 0
+    chunk = text[first:last]
+    local_start = max(0, match_start - first)
+    local_end = max(local_start, min(last - first, match_end - first))
+
+    hidden_left = first > 0
+    hidden_right = last < len(text)
+    if hidden_left and chunk:
+        removed_start, removed_end = terminal_cells.cell_unit_bounds(chunk)
+        removed = removed_end - removed_start
+        old_start, old_end = local_start, local_end
+        chunk = "…" + chunk[removed_end:]
+        if old_start < removed:
+            local_start, local_end = 0, max(1, old_end)
+        else:
+            local_start = 1 + old_start - removed
+            local_end = 1 + max(old_start, old_end) - removed
+    if hidden_right and chunk:
+        removed_start, removed_end = terminal_cells.cell_unit_bounds(chunk, from_end=True)
+        if local_end > removed_start:
+            local_end = max(local_start, removed_start)
+        chunk = chunk[:removed_start] + "…"
+    return chunk, local_start, local_end
 
 
 def fuzzy_backend() -> str:
@@ -163,8 +246,8 @@ def search_corpus(
 
 
 def _pad(text: str, width: int) -> str:
-    text = core.clip_ansi(text, max(0, width))
-    visible = len(core.strip_ansi(text))
+    text = terminal_cells.clip_cells_ansi(text, max(0, width))
+    visible = terminal_cells.display_width(text)
     return text + " " * max(0, width - visible)
 
 
@@ -217,24 +300,16 @@ def _flat_result_rows(
     for index in range(start, min(len(results), start + rows)):
         result = results[index]
         selected_row = index == selected
-        preview = result.text
-        if len(preview) > preview_width:
-            left = max(0, min(result.match_start - preview_width // 3, len(preview) - preview_width))
-            right = min(len(preview), left + preview_width)
-            local_start = max(0, result.match_start - left)
-            local_end = max(local_start, min(right - left, result.match_end - left))
-            preview = preview[left:right]
-            if left > 0 and preview:
-                preview = "…" + preview[1:]
-            if right < len(result.text) and preview:
-                preview = preview[:-1] + "…"
-        else:
-            local_start, local_end = result.match_start, result.match_end
+        projection = _source_projection(result.text)
+        display_start, display_end = projection.span(result.match_start, result.match_end)
+        preview, local_start, local_end = _crop_display_projection(
+            projection, display_start, display_end, preview_width
+        )
         preview = _highlight_span(preview, local_start, local_end, selected=selected_row, color=color)
         score = f"{result.score:>{score_width}.0f}" if result.score is not None else " " * score_width
         marker = "▌" if selected_row else " "
         row = (
-            f"{marker} {index + 1:>3}  {result.pane_name:<{filename_width}.{filename_width}} "
+            f"{marker} {index + 1:>3}  {_pad(_display_name(result.pane_name), filename_width)} "
             f"{result.source_index + 1:>{line_width}}  {_pad(preview, preview_width)}  {score}"
         )
         if selected_row and color:
@@ -272,7 +347,7 @@ def _grouped_result_rows(
         symbol = "▼" if expanded else "▶"
         best = max((member.score or 0.0) for _, member in members)
         score_suffix = f" · best {best:.0f}" if members and members[0][1].score is not None else ""
-        header = f"{symbol} {pane_name}  {len(members)}{score_suffix}"
+        header = f"{symbol} {_display_name(pane_name)}  {len(members)}{score_suffix}"
         style = core.BOLD_LIGHT_CYAN if selected_group else core.DIM
         out.append(_pad(core.paint(header, style, color), width))
         tags.append(("file", pane_index))
@@ -287,21 +362,14 @@ def _grouped_result_rows(
             selected_row = global_index == selected
             marker = "▌" if selected_row else " "
             prefix = f"{marker} {result.source_index + 1:>6}  "
-            room = max(8, width - len(prefix) - 8)
-            preview = result.text
-            local_start, local_end = result.match_start, result.match_end
-            if len(preview) > room:
-                left = max(0, min(result.match_start - room // 3, len(preview) - room))
-                right = min(len(preview), left + room)
-                local_start = max(0, result.match_start - left)
-                local_end = max(local_start, min(right - left, result.match_end - left))
-                preview = preview[left:right]
-                if left > 0 and preview:
-                    preview = "…" + preview[1:]
-                if right < len(result.text) and preview:
-                    preview = preview[:-1] + "…"
-            preview = _highlight_span(preview, local_start, local_end, selected=selected_row, color=color)
             score = f"  {result.score:.0f}" if result.score is not None else ""
+            room = max(8, width - terminal_cells.display_width(prefix) - terminal_cells.display_width(score))
+            projection = _source_projection(result.text)
+            display_start, display_end = projection.span(result.match_start, result.match_end)
+            preview, local_start, local_end = _crop_display_projection(
+                projection, display_start, display_end, room
+            )
+            preview = _highlight_span(preview, local_start, local_end, selected=selected_row, color=color)
             row = prefix + preview + score
             if selected_row and color:
                 row = "\x1b[1;97;48;5;24m" + row + core.RESET
@@ -315,9 +383,7 @@ def _grouped_result_rows(
 
 
 def _expanded_match_span(raw_text: str, result: GlobalSearchMatch) -> Tuple[int, int]:
-    start = len(raw_text[:result.match_start].replace("\t", "    "))
-    end = len(raw_text[:result.match_end].replace("\t", "    "))
-    return start, max(start, end)
+    return _source_projection(raw_text).span(result.match_start, result.match_end)
 
 
 def preview_text_width(width: int, height: int, line_count: int) -> int:
@@ -364,33 +430,45 @@ def _preview_rows(
     room = max(1, width - prefix_width)
 
     selected_raw = lines[selected_index].rstrip("\r\n")
-    selected_text = selected_raw.replace("\t", "    ")
-    match_start, match_end = _expanded_match_span(selected_raw, result)
-    base_left = max(0, min(match_start - room // 3, max(0, len(selected_text) - room)))
-    view_left = max(0, min(base_left + hscroll, max(0, len(selected_text) - room)))
+    selected_projection = _source_projection(selected_raw)
+    selected_text = selected_projection.text
+    match_start, match_end = selected_projection.span(result.match_start, result.match_end)
+    selected_boundaries = terminal_cells.cell_boundaries(selected_text)
+    selected_total = selected_boundaries[-1]
+    match_anchor = selected_boundaries[max(0, min(match_start, len(selected_text)))]
+    base_left = max(0, min(match_anchor - room // 3, max(0, selected_total - room)))
+    view_left = max(0, min(base_left + hscroll, max(0, selected_total - room)))
 
     visual_rows: List[str] = []
     focus_index: Optional[int] = None
     for source_index in range(source_start, source_end):
         raw_text = lines[source_index].rstrip("\r\n")
-        text = raw_text.replace("\t", "    ")
+        projection = _source_projection(raw_text)
+        text = projection.text
         selected = source_index == selected_index
         first_marker = ">" if selected else " "
         first_prefix = f"{first_marker} {source_index + 1:>{number_width}} │ "
         continuation_prefix = f"  {'':>{number_width}} │ "
 
         if selected:
-            local_match_start, local_match_end = _expanded_match_span(raw_text, result)
+            local_match_start, local_match_end = projection.span(result.match_start, result.match_end)
         else:
             local_match_start = local_match_end = 0
 
         if wrap:
-            chunk_starts = list(range(0, len(text), room)) or [0]
+            chunk_bounds = terminal_cells.cell_chunks(text, room)
             focus_segment = 0
             if source_index == anchor_index and source_index == selected_index and scroll == 0:
-                focus_segment = min(len(chunk_starts) - 1, local_match_start // room)
-            for segment_index, chunk_start in enumerate(chunk_starts):
-                chunk = text[chunk_start:chunk_start + room]
+                focus_segment = next(
+                    (
+                        index
+                        for index, (chunk_start, chunk_end) in enumerate(chunk_bounds)
+                        if chunk_start <= local_match_start < chunk_end
+                    ),
+                    max(0, len(chunk_bounds) - 1),
+                )
+            for segment_index, (chunk_start, chunk_end) in enumerate(chunk_bounds):
+                chunk = text[chunk_start:chunk_end]
                 if selected:
                     highlight_start = max(0, local_match_start - chunk_start)
                     highlight_end = min(len(chunk), local_match_end - chunk_start)
@@ -410,30 +488,17 @@ def _preview_rows(
                     row = "\x1b[1;97;48;5;24m" + row + core.RESET
                 visual_rows.append(_pad(row, width))
         else:
-            chunk = text[view_left:view_left + room]
-            right = view_left + room
-            hidden_left = view_left > 0
-            hidden_right = right < len(text)
-            if hidden_left and chunk:
-                chunk = "…" + chunk[1:]
-            if hidden_right and chunk:
-                chunk = chunk[:-1] + "…"
-            if selected:
-                highlight_start = max(0, local_match_start - view_left)
-                highlight_end = min(len(chunk), local_match_end - view_left)
-                if hidden_left:
-                    highlight_start = max(1, highlight_start)
-                    highlight_end = max(1, highlight_end)
-                if hidden_right and chunk:
-                    highlight_end = min(len(chunk) - 1, highlight_end)
-                if highlight_end > highlight_start:
-                    chunk = _highlight_span(
-                        chunk,
-                        highlight_start,
-                        highlight_end,
-                        selected=True,
-                        color=color,
-                    )
+            chunk, highlight_start, highlight_end = _slice_display_span(
+                text, view_left, room, local_match_start, local_match_end
+            )
+            if selected and highlight_end > highlight_start:
+                chunk = _highlight_span(
+                    chunk,
+                    highlight_start,
+                    highlight_end,
+                    selected=True,
+                    color=color,
+                )
             if source_index == anchor_index:
                 focus_index = len(visual_rows)
             row = first_prefix + chunk
@@ -446,7 +511,7 @@ def _preview_rows(
     top = max(0, focus_index - context_rows // 2)
     top = min(top, max(0, len(visual_rows) - context_rows))
     visible = visual_rows[top:top + context_rows]
-    out = [core.paint(f"{result.pane_name}:{result.source_index + 1}", core.BOLD_LIGHT_CYAN, color), ""]
+    out = [core.paint(f"{_display_name(result.pane_name)}:{result.source_index + 1}", core.BOLD_LIGHT_CYAN, color), ""]
     out.extend(visible)
     return out[:rows]
 
@@ -495,11 +560,13 @@ def render_global_search(
     sort_relevance = _tab("Relevance", sort_mode == SORT_RELEVANCE, color)
     sort_file = _tab("File", sort_mode == SORT_FILE, color)
     mode_row = "  ".join(mode_parts) + f"    Case: {case_label}    Sort: {sort_relevance}  {sort_file}"
-    if len(core.strip_ansi(mode_row)) + len(count_label) + 2 <= inner:
-        mode_row += " " * (inner - len(core.strip_ansi(mode_row)) - len(count_label)) + count_label
+    mode_width = terminal_cells.display_width(mode_row)
+    count_width = terminal_cells.display_width(count_label)
+    if mode_width + count_width + 2 <= inner:
+        mode_row += " " * (inner - mode_width - count_width) + count_label
 
     search_row = core.paint("Search: ", core.DIM, color) + query + core.paint("▌", core.BOLD_LIGHT_CYAN, color)
-    filter_row = f"Files: {file_filter_label}"
+    filter_row = f"Files: {_display_name(file_filter_label)}"
     if mode == SEARCH_FUZZY:
         filter_row += "    " + core.paint(f"Backend: {fuzzy_backend()}", core.DIM, color)
 
@@ -582,7 +649,7 @@ def render_global_search(
         right_rows = right_rows[:body_height] + [""] * max(0, body_height - len(right_rows))
 
     title = " Global search "
-    title_fill = max(0, panel_width - 2 - len(title))
+    title_fill = max(0, panel_width - 2 - terminal_cells.display_width(title))
     top = "╭" + "─" * min(3, title_fill) + title + "─" * max(0, title_fill - 3) + "╮"
     bottom = "╰" + "─" * (panel_width - 2) + "╯"
     panel: List[str] = [core.paint(top, core.BOLD_LIGHT_CYAN, color)]
@@ -616,7 +683,7 @@ def render_global_search(
         if y >= height:
             break
         left = " " * left_margin
-        right = " " * max(0, width - left_margin - len(core.strip_ansi(row)))
+        right = " " * max(0, width - left_margin - terminal_cells.display_width(row))
         out[y] = left + row + right
     if not color:
         out = [core.strip_ansi(row) for row in out]

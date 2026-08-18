@@ -51,3 +51,22 @@ Implementation is ready for independent review. The full-suite failures are conf
 Fix the four scoped review findings in the canonical review file, with focused regression coverage. Preserve raw source semantics for search while making every output path terminal-safe and cell-correct.
 
 ---
+### 2026-08-18T23:59:43+02:00 — IMPLEMENTER → REVIEWER — 001
+
+**Result:** Review fixes ready
+
+**Verification**
+
+- Focused Spec 001 tests: 14/14 passed
+- Related global-search, pane, feature, and interaction tests: 46/46 passed
+- compileall: passed
+- git diff --check: passed
+- Frozen v0.9.0 reference comparison: exact match
+- Release build and htail 0.17.3 version smoke test: passed
+- Canonical local suite: 234 tests; 9 Windows CRLF/POSIX-host failures, 3 unrelated Windows cleanup/bundle errors, 1 skipped
+
+**Message**
+
+Implemented reviewer findings R1-R4: global-search display projection now sanitizes source controls while preserving raw search spans; global-search geometry is cell-aware; complex emoji sequences share a wcwidth-based cluster model; pipe-driven interactive startup confirms through the controlling terminal or fails closed. Isolated unrelated cleanup tests pass when run alone.
+
+---

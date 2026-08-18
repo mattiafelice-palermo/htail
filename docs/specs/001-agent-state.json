@@ -6,8 +6,8 @@
   "children": [
     "001"
   ],
-  "turn": "IMPLEMENTER",
-  "action": "FIX_REVIEW",
+  "turn": "REVIEWER",
+  "action": "REVIEW",
   "findings": [
     "R1",
     "R2",
@@ -15,5 +15,5 @@
     "R4"
   ],
   "resume_review": "REVIEW",
-  "updated_at": "2026-08-18T23:40:30+02:00"
+  "updated_at": "2026-08-18T23:59:43+02:00"
 }
