@@ -1,6 +1,6 @@
 # Review — Spec 001: Safe non-text handling and terminal-cell-correct rendering
 
-Status: **Final review — verification required**
+Status: **Complete — review-clean**
 Branch: `feature/0.17.3-safe-non-text-terminal-rendering`
 Active work unit: `001`
 
@@ -197,3 +197,9 @@ Record authoritative GitHub Actions evidence that the canonical `CI` workflow pa
 - Record the GitHub Actions run ID (and URL when available), tested commit SHA, conclusion, and the fact that the `test` job completed successfully.
 - Confirm the workflow's compile, full unittest, invariant comparison, standalone build, runtime build/self-test, and version smoke steps all passed.
 - Do not substitute the known Windows-host local suite with unresolved failures for this canonical gate.
+
+## Final review completion
+
+R7 is **resolved**. GitHub Actions run `32192196077` is the repository `CI` workflow, triggered by the feature-branch push for exact implementation commit `e099c6d21a07a7d2d74c01d4686eac92c025ebe2`; the run completed with conclusion `success`. Job `95888730947` (`test`) completed successfully, and every required gate step reported success: compile source, full unittest discovery, v0.9.0 invariant comparison, standalone executable build, current-ABI runtime build, runtime self-test, and core/version smoke test.
+
+All R1-R7 findings are resolved. All locked Spec 001 requirements and cumulative acceptance evidence are satisfied. The feature is review-clean and ready to merge; no merge, tag, release, or promotion action is performed by this workflow.
