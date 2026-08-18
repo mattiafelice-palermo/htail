@@ -70,3 +70,17 @@ Fix the four scoped review findings in the canonical review file, with focused r
 Implemented reviewer findings R1-R4: global-search display projection now sanitizes source controls while preserving raw search spans; global-search geometry is cell-aware; complex emoji sequences share a wcwidth-based cluster model; pipe-driven interactive startup confirms through the controlling terminal or fails closed. Isolated unrelated cleanup tests pass when run alone.
 
 ---
+### 2026-08-19T00:07:04+02:00 — REVIEWER → IMPLEMENTER — 001
+
+**Result:** Changes required
+
+**Findings**
+
+- R5
+- R6
+
+**Message**
+
+R1-R4 are resolved. Fix the remaining source-output safety path and make PDF magic supplementary per the locked classifier rule.
+
+---
