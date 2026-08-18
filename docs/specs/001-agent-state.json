@@ -6,14 +6,12 @@
   "children": [
     "001"
   ],
-  "turn": "REVIEWER",
-  "action": "REVIEW",
+  "turn": "IMPLEMENTER",
+  "action": "FIX_REVIEW",
   "findings": [
-    "R1",
-    "R2",
-    "R3",
-    "R4"
+    "R5",
+    "R6"
   ],
   "resume_review": "REVIEW",
-  "updated_at": "2026-08-18T23:59:43+02:00"
+  "updated_at": "2026-08-19T00:07:04+02:00"
 }
