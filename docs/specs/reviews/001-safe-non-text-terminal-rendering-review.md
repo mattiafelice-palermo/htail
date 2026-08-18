@@ -1,6 +1,6 @@
 # Review — Spec 001: Safe non-text handling and terminal-cell-correct rendering
 
-Status: **Changes required**
+Status: **Review-clean; final parent review pending**
 Branch: `feature/0.17.3-safe-non-text-terminal-rendering`
 Active work unit: `001`
 
@@ -161,3 +161,11 @@ Make format signatures supplementary only: a magic prefix may strengthen/report 
 - Strictly decodable, ordinary printable text beginning with `%PDF-` is not suspicious when no other binary/readability signal is present.
 - PDF-like binary content remains suspicious based on the combined content signals.
 - Add a generic binary/random-like regression independent of the PDF signature.
+
+## Review round 3 — returned fixes
+
+R5 is **resolved**. Markdown outline parsing still uses the canonical raw snapshot and retains the source index, while palette labels now sanitize `entry.text` at the display seam. Focused coverage renders a heading containing CSI-like ESC content, BEL and a C1 control, verifies their visible representations, and preserves the outline target index.
+
+R6 is **resolved**. `%PDF-` is now added only as an explanatory supplementary reason after another readability signal has already made the sample suspicious. Focused coverage accepts ordinary printable text beginning with `%PDF-`, retains PDF-like binary detection, and adds generic binary coverage independent of the PDF prefix.
+
+No child-review findings remain open. The implementation is ready for the cumulative parent review and final acceptance-evidence check.
