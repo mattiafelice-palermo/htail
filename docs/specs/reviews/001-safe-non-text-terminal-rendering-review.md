@@ -105,4 +105,59 @@ For every interactive startup, directly named suspicious local files must not be
 
 ## Verification notes
 
-The implementer handoff reports focused Spec 001 tests, compileall, diff check, frozen-reference comparison, and release build/version smoke as passing. The reported local full suite had nine pre-existing host/platform failures and one skip; final review must verify the repository's canonical branch gate/acceptance evidence before completion.
+The initial implementer handoff reported focused Spec 001 tests, compileall, diff check, frozen-reference comparison, and release build/version smoke as passing. The reported local full suite had host/platform failures; final review must verify the repository's canonical branch gate/acceptance evidence before completion.
+
+## Review round 2 — returned fixes
+
+R1 is **resolved**. Global-search result/file/preview display now projects raw source text through sanitization while preserving the canonical raw corpus and translating match boundaries; focused coverage verifies raw CSI/BEL/C1 content does not survive as executable terminal input and htail highlighting remains present.
+
+R2 is **resolved**. Global-search padding, row composition, preview wrapping/horizontal slicing, file-name rendering, and final panel padding now use terminal-cell helpers. Focused tests cover relevance/file layouts, preview hscroll, CJK, combining text, emoji, and width-exact output.
+
+R3 is **resolved**. Terminal-cell iteration now groups relevant combining/variation/ZWJ units and uses `wcswidth()` consistently for the same unit across measurement, clipping, slicing, wrapping and tab projection. Focused tests cover a ZWJ sequence and emoji-presentation variation sequence, including pane-border exactness.
+
+R4 is **resolved**. Interactive startup now always filters suspicious direct files; when stdin is a source pipe it attempts a controlling-terminal input stream and fails closed when none is available. Focused coverage exercises the non-TTY-stdin interactive path.
+
+### R5 — High: Markdown outline palette still renders raw source controls
+
+Affected files:
+- `src/htail_app/app.py`
+- `src/htail_app/extras.py` if the sanitization seam belongs there
+- focused command-palette/outline safety tests
+
+**Current**
+
+The source-safety contract is still bypassed by the Markdown outline UI. `_palette_all_items()` calls `markdown_outline(pane.snapshot_raw)` and places `entry.text` directly into `PaletteItem.label`. Palette rendering then appends `item.label` to terminal rows. Because the label is not sanitized first, source-provided `ESC`/CSI/OSC/control characters in a Markdown heading can again be interpreted as terminal control sequences when the user opens the outline palette.
+
+This is the same trust-boundary problem fixed for the ordinary pane and global search: canonical source data may remain raw, but every output projection of source-derived text must be safe.
+
+**Target**
+
+Keep outline parsing/source indices based on canonical raw Markdown, but sanitize heading text before it becomes a rendered palette label. Audit the immediately related source-derived palette/display path so the fix is made at the correct display seam rather than as a one-off escape replacement.
+
+**Acceptance criteria**
+
+- A Markdown snapshot containing a heading with representative `ESC`/CSI, BEL and C1 controls can still produce an outline entry/source index.
+- Rendering the outline palette contains visible safe representations and no executable source-provided terminal control sequence.
+- Normal Unicode heading text and outline navigation remain unchanged.
+
+### R6 — Medium: PDF magic bytes are currently a standalone classifier decision
+
+Affected files:
+- `src/htail_app/text_safety.py`
+- `tests/test_safe_non_text_0173.py`
+
+**Current**
+
+Spec 001 locks known file signatures to supplementary evidence only. `inspect_bytes()` currently appends a suspicious reason whenever the sample starts with `%PDF-`, and `suspicious` is simply `bool(reasons)`. Therefore a fully printable, strictly decodable text file whose contents happen to begin with `%PDF-` is classified as suspicious solely because of the magic prefix.
+
+That makes the signature itself a primary/standalone classifier, contrary to the locked decision. The existing PDF-like regression combines the signature with strongly binary bytes, so it does not catch this false-positive case; there is also no separate generic-binary test independent of the PDF signature.
+
+**Target**
+
+Make format signatures supplementary only: a magic prefix may strengthen/report a decision supported by decode/control/printability evidence, but must not by itself make otherwise readable text suspicious. Keep the classifier deterministic and bounded.
+
+**Acceptance criteria**
+
+- Strictly decodable, ordinary printable text beginning with `%PDF-` is not suspicious when no other binary/readability signal is present.
+- PDF-like binary content remains suspicious based on the combined content signals.
+- Add a generic binary/random-like regression independent of the PDF signature.
