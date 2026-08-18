@@ -1,6 +1,6 @@
 # Review — Spec 001: Safe non-text handling and terminal-cell-correct rendering
 
-Status: **Review-clean; final parent review pending**
+Status: **Final review — verification required**
 Branch: `feature/0.17.3-safe-non-text-terminal-rendering`
 Active work unit: `001`
 
@@ -169,3 +169,31 @@ R5 is **resolved**. Markdown outline parsing still uses the canonical raw snapsh
 R6 is **resolved**. `%PDF-` is now added only as an explanatory supplementary reason after another readability signal has already made the sample suspicious. Focused coverage accepts ordinary printable text beginning with `%PDF-`, retains PDF-like binary detection, and adds generic binary coverage independent of the PDF prefix.
 
 No child-review findings remain open. The implementation is ready for the cumulative parent review and final acceptance-evidence check.
+
+## Final cumulative parent review
+
+Fresh comparison against merge base `d43ce053016d9b527c5d66d901aebe7d1ab55f38` shows the branch is ahead only by the Spec 001 implementation, its tests/documentation, and workflow/review records. The cumulative architecture is coherent: raw source state is preserved for search/filter/change semantics; source-derived output is sanitized at rendering boundaries; `terminal_cells.py` is the shared ANSI-aware cell-geometry seam; `wcwidth==0.2.13` is pinned in the bundled runtime; and direct suspicious-file startup behavior is content/encoding based rather than extension based.
+
+Versioning and user-facing documentation are closed correctly: `VERSION` is `0.17.3`, `RELEASE_NOTES.md` contains the required `New features` / `Bug fixes` sections, and README documents both suspicious-file confirmation/non-interactive warning behavior and Unicode/control-character rendering.
+
+Focused evidence reported across the implementation/review rounds is sufficient for the changed subsystems: Spec 001 tests reached 16/16, related outline/global-search coverage reached 20/20, compileall and `git diff --check` passed, the frozen v0.9.0 invariant comparison was exact, and the standalone 0.17.3 release build/version smoke test passed. The remaining merge gate is the repository's canonical branch CI, because the implementer's Windows-host aggregate run still reports platform/cleanup failures and therefore cannot itself satisfy the spec's final `repository canonical validation passes` acceptance criterion.
+
+### R7 — High: record a green canonical branch CI run for the final implementation
+
+Affected files:
+- no implementation file unless CI exposes a defect
+- `docs/specs/001-agent-coordination.md` / final verification record
+
+**Current**
+
+The final product implementation is commit `e099c6d21a07a7d2d74c01d4686eac92c025ebe2` (`Fix outline safety and classifier evidence`). The repository `CI` workflow runs on every non-`main` push and is the canonical Linux gate: compileall, complete unittest discovery, v0.9.0 invariant comparison, standalone build, current-ABI runtime build/self-test, and version smoke. Reviewer connector access can inspect workflow files and exact commits but cannot enumerate push-triggered Actions runs; the available commit-workflow wrapper exposes only pull-request-triggered runs. The implementer handoff does not yet record the corresponding green branch-CI run ID/result.
+
+**Target**
+
+Record authoritative GitHub Actions evidence that the canonical `CI` workflow passed for `e099c6d21a07a7d2d74c01d4686eac92c025ebe2`, or for a later descendant containing identical product/test code and only workflow/review-document changes. If CI is red, fix only the actual failures and rerun the normal verification/handoff flow.
+
+**Acceptance criteria**
+
+- Record the GitHub Actions run ID (and URL when available), tested commit SHA, conclusion, and the fact that the `test` job completed successfully.
+- Confirm the workflow's compile, full unittest, invariant comparison, standalone build, runtime build/self-test, and version smoke steps all passed.
+- Do not substitute the known Windows-host local suite with unresolved failures for this canonical gate.
