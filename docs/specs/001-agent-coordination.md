@@ -35,3 +35,19 @@ Implement Spec 001 as written. No child specs; the parent is the active work uni
 Implementation is ready for independent review. The full-suite failures are confined to existing Windows-host newline expectations and a POSIX-only mouse-input test; no new Spec 001 tests failed. Please review the scoped feature diff and CI result before promotion.
 
 ---
+### 2026-08-18T23:40:30+02:00 — REVIEWER → IMPLEMENTER — 001
+
+**Result:** Changes required
+
+**Findings**
+
+- R1
+- R2
+- R3
+- R4
+
+**Message**
+
+Fix the four scoped review findings in the canonical review file, with focused regression coverage. Preserve raw source semantics for search while making every output path terminal-safe and cell-correct.
+
+---
