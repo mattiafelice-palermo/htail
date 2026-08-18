@@ -42,6 +42,11 @@ class TextLikelihoodTests(unittest.TestCase):
         self.assertTrue(first.suspicious)
         self.assertEqual(first.suspicious, second.suspicious)
 
+    def test_pdf_magic_is_supplementary_and_generic_binary_is_suspicious(self):
+        printable_pdf_label = b"%PDF-1.7\nThis is ordinary printable text, not a PDF payload.\n"
+        self.assertFalse(inspect_bytes(printable_pdf_label, "utf-8").suspicious)
+        self.assertTrue(inspect_bytes(bytes(range(256)) * 8, "utf-8").suspicious)
+
     def test_classifier_reads_only_a_bounded_sample(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "large.log"
@@ -108,6 +113,38 @@ class TerminalSafetyTests(unittest.TestCase):
                 app._confirm_initial_local_sources(args)
         self.assertEqual(args.files, [])
         self.assertIn("not opening", output.getvalue())
+
+    def test_outline_palette_sanitizes_heading_controls_and_keeps_source_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "outline.md"
+            path.write_text("# Heading \x1b[2J\x07\u0081\n", encoding="utf-8")
+            args = parse_args(
+                [
+                    str(path),
+                    "--no-native-watch",
+                    "--no-color",
+                    "--syntax",
+                    "none",
+                    "--no-self-install-prompt",
+                ]
+            )
+            instance = MultiApp(args, False, core.DisplayFilter(), core.UpdateService(""))
+            try:
+                instance.palette_mode = "outline"
+                rows = instance._palette_lines(100, 20)
+                items = instance._palette_all_items()
+            finally:
+                instance.close_native_watch()
+
+        rendered = "\n".join(rows)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].value, 0)
+        self.assertNotIn("\x1b[2J", rendered)
+        self.assertNotIn("\x07", rendered)
+        self.assertNotIn("\x81", rendered)
+        self.assertIn("␛[2J", rendered)
+        self.assertIn("␇", rendered)
+        self.assertIn("\\x81", rendered)
 
 
 class TerminalCellGeometryTests(unittest.TestCase):

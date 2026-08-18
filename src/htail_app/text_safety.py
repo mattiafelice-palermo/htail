@@ -120,14 +120,14 @@ def inspect_bytes(payload: bytes, encoding: str = "utf-8") -> TextInspection:
     printable_density = printable / length
 
     reasons = []
-    if sample.startswith(b"%PDF-"):
-        reasons.append("the sample has a PDF binary signature")
     if control_density > 0.05:
         reasons.append("the sample contains a high density of control characters")
     if printable_density < 0.70 and len(decoded) >= 32:
         reasons.append("the sample has a low printable-character density")
     if not _is_utf_family(encoding) and nul_density > 0.01:
         reasons.append("the sample contains a high density of NUL bytes")
+    if sample.startswith(b"%PDF-") and reasons:
+        reasons.insert(0, "the sample has a PDF binary signature")
 
     return TextInspection(
         bool(reasons),

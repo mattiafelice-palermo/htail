@@ -28,7 +28,7 @@ from .global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, fuzzy_backen
 from .git_remote import GitFileContext, GitRemoteFollower, GitRemoteRef, discover_git_file, list_remote_refs
 from .searching import GlobalSearchMatch, SEARCH_BOOLEAN, SEARCH_FUZZY, SEARCH_REGEX, SEARCH_SIMPLE, compile_search, search_label, simple_escape
 from .sources import CommandFollower, CompressedFollower, SSHFollower, StreamFollower
-from .text_safety import inspect_file, warning_for
+from .text_safety import inspect_file, sanitize_source_line, warning_for
 from .watcher import FileFollower, WatchNotice, WatchUpdate
 
 # The reusable core is copied from the previous single-file implementation.
@@ -926,7 +926,12 @@ class MultiApp:
         pane = self.active_pane()
         if self.palette_mode == "outline":
             return [
-                PaletteItem(("  " * max(0, entry.level - 1)) + f"{entry.text}", "outline-jump", entry.source_index, f"line {entry.source_index + 1}")
+                PaletteItem(
+                    ("  " * max(0, entry.level - 1)) + sanitize_source_line(entry.text),
+                    "outline-jump",
+                    entry.source_index,
+                    f"line {entry.source_index + 1}",
+                )
                 for entry in markdown_outline(pane.snapshot_raw)
             ]
         if self.palette_mode == "git-source":

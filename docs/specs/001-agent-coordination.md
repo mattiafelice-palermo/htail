@@ -84,3 +84,22 @@ Implemented reviewer findings R1-R4: global-search display projection now saniti
 R1-R4 are resolved. Fix the remaining source-output safety path and make PDF magic supplementary per the locked classifier rule.
 
 ---
+### 2026-08-19T00:19:03+02:00 — IMPLEMENTER → REVIEWER — 001
+
+**Result:** Review fixes ready
+
+**Verification**
+
+- Focused Spec 001 tests: 16/16 passed
+- Related outline/global-search tests: 20/20 passed
+- Canonical local suite: 236 tests, 9 Windows CRLF/POSIX-host failures, 2 unrelated Windows cleanup/bundle errors, 1 skipped
+- compileall: passed
+- git diff --check: passed
+- Frozen v0.9.0 reference comparison: exact match
+- Release build and htail 0.17.3 version smoke test: passed
+
+**Message**
+
+Resolved R5 by sanitizing Markdown outline palette labels at the display seam while preserving source indices. Resolved R6 by making PDF magic supplementary evidence and adding printable-PDF and generic-binary classifier coverage.
+
+---
