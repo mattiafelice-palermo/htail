@@ -15,6 +15,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 from . import core
 from . import input as input_module
 from . import pane as pane_module
+from . import terminal_cells
 
 
 DOUBLE_CLICK_SECONDS = 0.42
@@ -459,22 +460,25 @@ def _visible_boundaries(text: str) -> Tuple[str, List[int]]:
 def _replace_visible_cell(text: str, column: int, replacement: str) -> str:
     plain, boundaries = _visible_boundaries(text)
     if column < 0:
-        column += len(plain)
-    if column < 0 or column >= len(plain):
-        return text
-    start = boundaries[column]
-    end = boundaries[column + 1]
-    return text[:start] + replacement + text[end:]
-
-
-def _style_visible_span(text: str, start: int, end: int, style: str) -> str:
-    plain, boundaries = _visible_boundaries(text)
-    start = max(0, min(len(plain), start))
-    end = max(start, min(len(plain), end))
+        column += terminal_cells.display_width(plain)
+    start, end = terminal_cells.cell_range_bounds(plain, column, column + 1)
     if end <= start:
         return text
     raw_start = boundaries[start]
     raw_end = boundaries[end]
+    return text[:raw_start] + replacement + text[raw_end:]
+
+
+def _style_visible_span(text: str, start: int, end: int, style: str) -> str:
+    plain, boundaries = _visible_boundaries(text)
+    width = terminal_cells.display_width(plain)
+    start = max(0, min(width, int(start)))
+    end = max(start, min(width, int(end)))
+    plain_start, plain_end = terminal_cells.cell_range_bounds(plain, start, end)
+    if plain_end <= plain_start:
+        return text
+    raw_start = boundaries[plain_start]
+    raw_end = boundaries[plain_end]
     restore = pane_module._active_sgr_prefix(text, raw_start)
     selected = core.strip_ansi(text[raw_start:raw_end])
     return text[:raw_start] + style + selected + core.RESET + restore + text[raw_end:]
@@ -484,7 +488,8 @@ def _insert_before_last_visible(text: str, insertion: str) -> str:
     plain, boundaries = _visible_boundaries(text)
     if not plain:
         return text + insertion
-    raw = boundaries[len(plain) - 1]
+    unit_start, _ = terminal_cells.cell_unit_bounds(plain, from_end=True)
+    raw = boundaries[unit_start]
     return text[:raw] + insertion + text[raw:]
 
 
@@ -512,10 +517,11 @@ def _selection_text(
             continue
         plain = core.strip_ansi(visual_rows[visual_index])
         left = start_col if visual_index == start_visual else 0
-        right = end_col if visual_index == end_visual else len(plain)
-        left = max(0, min(len(plain), left))
-        right = max(left, min(len(plain), right))
-        pieces.append(plain[left:right])
+        right = end_col if visual_index == end_visual else terminal_cells.display_width(plain)
+        left = max(0, min(terminal_cells.display_width(plain), left))
+        right = max(left, min(terminal_cells.display_width(plain), right))
+        plain_start, plain_end = terminal_cells.cell_range_bounds(plain, left, right)
+        pieces.append(plain[plain_start:plain_end])
     return "\n".join(pieces)
 
 
@@ -653,7 +659,11 @@ def _install_pane_chrome() -> None:
                         continue
                     plain_source = core.strip_ansi(visual_rows[visual_index])
                     row_start = start_col if visual_index == start_visual else 0
-                    row_end = end_col if visual_index == end_visual else len(plain_source)
+                    row_end = (
+                        end_col
+                        if visual_index == end_visual
+                        else terminal_cells.display_width(plain_source)
+                    )
                     visible_start = max(0, row_start - viewport_start)
                     visible_end = min(content_width, row_end - viewport_start)
                     if visible_end > visible_start:
@@ -713,13 +723,14 @@ def _directional_neighbor(rects, current_index: int, direction: str) -> Optional
 def _selection_word(text: str, column: int) -> Optional[Tuple[int, int, str]]:
     if not text:
         return None
-    column = max(0, min(column, len(text) - 1))
-    if text[column].isspace():
+    codepoint = terminal_cells.cell_index_at(text, column)
+    if codepoint >= len(text) or text[codepoint].isspace():
         return None
     token_re = re.compile(r"[\w./:@+~$%-]+|[^\s]")
     for match in token_re.finditer(text):
-        if match.start() <= column < match.end():
-            return match.start(), match.end(), match.group(0)
+        if match.start() <= codepoint < match.end():
+            boundaries = terminal_cells.cell_boundaries(text)
+            return boundaries[match.start()], boundaries[match.end()], match.group(0)
     return None
 
 
@@ -1033,9 +1044,10 @@ def _install_app_features() -> None:
             return None
         plain = core.strip_ansi(raw_row)
         full_column = viewport_start + content_x
+        plain_width = terminal_cells.display_width(plain)
         if clamp:
-            full_column = min(max(0, full_column), len(plain))
-        elif full_column < 0 or full_column >= len(plain):
+            full_column = min(max(0, full_column), plain_width)
+        elif full_column < 0 or full_column >= plain_width:
             return None
         return mode, visual, visual_index, full_column, plain, table
 
@@ -1069,7 +1081,7 @@ def _install_app_features() -> None:
         if point is None:
             return False
         mode, visual, visual_index, full_column, plain, table = point
-        if full_column >= len(plain):
+        if full_column >= terminal_cells.display_width(plain):
             return False
         selected = _selection_word(plain, full_column)
         if selected is None:
@@ -1151,11 +1163,11 @@ def _install_app_features() -> None:
         endpoint_start = full_column
         endpoint_end = full_column + 1
         if drag.get("granularity") == "word" and plain:
-            word_column = min(max(0, full_column), len(plain) - 1)
+            word_column = min(max(0, full_column), terminal_cells.display_width(plain) - 1)
             selected = _selection_word(plain, word_column)
             if selected is not None:
                 endpoint_start, endpoint_end, _text = selected
-        endpoint_end = min(len(plain), endpoint_end)
+        endpoint_end = min(terminal_cells.display_width(plain), endpoint_end)
         if (visual_index, endpoint_start) < (anchor_visual, anchor_start):
             start_visual, start_col = visual_index, endpoint_start
             end_visual, end_col = anchor_visual, anchor_end

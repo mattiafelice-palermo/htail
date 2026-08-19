@@ -12,6 +12,12 @@ from htail_app.app import MultiApp, parse_args
 from htail_app.global_search import SORT_FILE, SORT_RELEVANCE, build_corpus, render_global_search, search_corpus
 from htail_app.pane import Pane
 from htail_app.searching import GlobalSearchMatch, SEARCH_SIMPLE
+from htail_app.ui_features import (
+    _replace_visible_cell,
+    _selection_text,
+    _selection_word,
+    _style_visible_span,
+)
 from htail_app.text_safety import (
     CLASSIFIER_SAMPLE_BYTES,
     inspect_bytes,
@@ -146,6 +152,37 @@ class TerminalSafetyTests(unittest.TestCase):
         self.assertIn("␇", rendered)
         self.assertIn("\\x81", rendered)
 
+    def test_unicode_format_and_separator_controls_are_visible(self):
+        controls = (0x00AD, 0x200B, 0x2028, 0x2029, 0x202E, 0x2066, 0xFEFF)
+        raw = "left" + "".join(chr(codepoint) for codepoint in controls) + "right\n"
+        safe = sanitize_source_line(raw)
+
+        for codepoint in controls:
+            character = chr(codepoint)
+            self.assertNotIn(character, safe)
+            self.assertIn(f"\\u{codepoint:04x}", safe)
+        self.assertEqual(sanitize_source_line("👩\u200d💻\n"), "👩\u200d💻\n")
+
+    def test_snapshot_rendering_keeps_source_controls_non_executable(self):
+        pane = Pane(
+            Path("snapshot-controls.txt"),
+            core.SyntaxHighlighter(Path("snapshot-controls.txt"), "none", False),
+            core.DisplayFilter(),
+            False,
+            0.0,
+        )
+        raw = "prefix\x1b[2J\x07\x08\x00\x7f\x81\rcontent\n"
+        pane.set_snapshot([raw], prefer=True)
+        rendered = "\n".join(pane.render_box(80, 6, True, 0))
+        source_projection = "\n".join(core.strip_ansi(row) for row in pane._snapshot_visual_lines)
+
+        for control in ("\x1b", "\x07", "\x08", "\x00", "\x7f", "\x81"):
+            self.assertNotIn(control, source_projection)
+        self.assertIn("␛[2J", source_projection)
+        self.assertIn("␍", source_projection)
+        self.assertIn("\\x81", source_projection)
+        self.assertTrue(rendered)
+
 
 class TerminalCellGeometryTests(unittest.TestCase):
     def make_pane(self, path: Path) -> Pane:
@@ -177,6 +214,22 @@ class TerminalCellGeometryTests(unittest.TestCase):
                 self.assertEqual(width, terminal_cells.display_width(terminal_cells.pad_cells_ansi(sequence, width)))
                 wrapped = core.wrap_ansi(sequence, width)
                 self.assertEqual([terminal_cells.display_width(row) for row in wrapped], [width])
+
+    def test_selection_and_overlay_use_terminal_cells_for_unicode_clusters(self):
+        text = "界 e\u0301 👩\u200d💻"
+        self.assertEqual(terminal_cells.display_width(text), 7)
+        self.assertEqual(_selection_text([text], 0, 0, 0, 2), "界")
+        self.assertEqual(_selection_text([text], 0, 3, 0, 4), "e\u0301")
+        self.assertEqual(_selection_text([text], 0, 5, 0, 7), "👩\u200d💻")
+        self.assertEqual(_selection_word(text, 1), (0, 2, "界"))
+
+        styled = _style_visible_span(text, 0, 2, "\x1b[7m")
+        self.assertEqual(core.strip_ansi(styled), text)
+        self.assertIn("\x1b[7m界\x1b[0m", styled)
+        self.assertEqual(core.strip_ansi(_replace_visible_cell(text, 1, "X")), "X e\u0301 👩\u200d💻")
+
+        ansi_text = core.paint(text, core.BOLD, True)
+        self.assertEqual(_selection_text([ansi_text], 0, 5, 0, 7), "👩\u200d💻")
 
     def test_complex_emoji_near_pane_clipping_keeps_borders_exact(self):
         pane = self.make_pane(Path("emoji.txt"))

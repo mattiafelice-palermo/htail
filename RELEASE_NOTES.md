@@ -1,3 +1,13 @@
+# htail 0.17.4
+
+## New features
+
+- None.
+
+## Bug fixes
+
+- Hidden Unicode formatting/separator characters are rendered visibly, while terminal-cell-aware selection preserves wide, combining, and emoji graphemes without corrupting pane geometry.
+
 # htail 0.17.3
 
 ## New features

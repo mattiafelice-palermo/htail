@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 from dataclasses import dataclass
 from pathlib import Path
+import unicodedata
 from typing import List, Optional, Tuple
 
 
@@ -45,6 +46,21 @@ _CONTROL_PICTURES = {
     0x1F: "␟",
     0x7F: "␡",
 }
+
+_GRAPHEME_FORMAT_CONTROLS = {0x200C, 0x200D}
+
+
+def _needs_unicode_escape(char: str) -> bool:
+    """Return whether an invisible Unicode character needs visible escaping."""
+
+    codepoint = ord(char)
+    if codepoint in _GRAPHEME_FORMAT_CONTROLS:
+        # ZWNJ and ZWJ are part of legitimate script shaping and emoji
+        # sequences. They are not terminal controls and must remain available
+        # to the grapheme-width model.
+        return False
+    category = unicodedata.category(char)
+    return category in {"Cf", "Cn", "Cs", "Zl", "Zp"}
 
 
 @dataclass(frozen=True)
@@ -173,6 +189,10 @@ def _visible_control(char: str) -> str:
         return picture
     if 0x80 <= codepoint <= 0x9F:
         return f"\\x{codepoint:02x}"
+    if _needs_unicode_escape(char):
+        if codepoint <= 0xFFFF:
+            return f"\\u{codepoint:04x}"
+        return f"\\U{codepoint:08x}"
     return char
 
 
@@ -181,7 +201,11 @@ def _sanitize_display_char(char: str) -> str:
         return "␊"
     if char == "\r":
         return "␍"
-    if char == "\t" or char.isprintable():
+    if char == "\t":
+        return char
+    if char in {"\u200c", "\u200d"}:
+        return char
+    if char.isprintable() and not _needs_unicode_escape(char):
         return char
     return _visible_control(char)
 

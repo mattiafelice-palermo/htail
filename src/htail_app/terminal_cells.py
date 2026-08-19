@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - exercised only in dependency-less tree
 
 
 TAB_SIZE = 8
+_GRAPHEME_FORMAT_CONTROLS = {0x200C, 0x200D}
 
 
 def _fallback_char_width(char: str) -> int:
@@ -128,12 +129,15 @@ def _safe_plain_char(char: str) -> str:
     """Defensively make a non-ANSI unit visible before it reaches stdout."""
 
     codepoint = ord(char)
+    category = unicodedata.category(char)
     if char == "\t":
         return char
     if char == "\n":
         return "␊"
     if char == "\r":
         return "␍"
+    if codepoint in _GRAPHEME_FORMAT_CONTROLS:
+        return char
     if codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
         if codepoint == 0x00:
             return "␀"
@@ -148,6 +152,10 @@ def _safe_plain_char(char: str) -> str:
         if 0x80 <= codepoint <= 0x9F:
             return f"\\x{codepoint:02x}"
         return chr(0x2400 + codepoint)
+    if category in {"Cf", "Cn", "Cs", "Zl", "Zp"}:
+        if codepoint <= 0xFFFF:
+            return f"\\u{codepoint:04x}"
+        return f"\\U{codepoint:08x}"
     return char
 
 
@@ -172,6 +180,63 @@ def cell_boundaries(text: str) -> List[int]:
         boundaries[end] = visible
         pos = end
     return boundaries
+
+
+def cell_index_at(text: str, cell: int, *, include_partial: bool = False) -> int:
+    """Return a plain-text index for a terminal-cell position.
+
+    Mouse coordinates can land on either cell of a wide grapheme.  They must
+    resolve to the same whole unit instead of being treated as a code-point
+    offset into that unit.
+    """
+
+    target = max(0, int(cell))
+    visible = 0
+    pos = 0
+    while pos < len(text):
+        end = _cluster_end(text, pos)
+        unit_width = _plain_width(_safe_plain_text(text[pos:end]))
+        if target <= visible:
+            return pos
+        if unit_width and target < visible + unit_width:
+            return end if include_partial else pos
+        visible += unit_width
+        pos = end
+    return len(text)
+
+
+def cell_range_bounds(text: str, start: int, end: int) -> Tuple[int, int]:
+    """Return plain-text code-point bounds covering a cell range.
+
+    A range touching any part of a grapheme includes that whole grapheme, so
+    selection and styling never split wide, combining, or ZWJ sequences.
+    """
+
+    start = max(0, int(start))
+    end = max(start, int(end))
+    if not text or end <= start:
+        return 0, 0
+
+    visible = 0
+    first: Optional[int] = None
+    last: Optional[int] = None
+    pos = 0
+    while pos < len(text):
+        next_pos = _cluster_end(text, pos)
+        unit_width = _plain_width(_safe_plain_text(text[pos:next_pos]))
+        unit_end = visible + unit_width
+        if unit_width and unit_end > start and visible < end:
+            if first is None:
+                first = pos
+            last = next_pos
+        visible = unit_end
+        pos = next_pos
+        if visible >= end:
+            break
+
+    if first is None or last is None:
+        return 0, 0
+    return first, last
 
 
 def cell_slice_bounds(text: str, start: int, width: int) -> Tuple[int, int]:
